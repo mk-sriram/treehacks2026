@@ -1,6 +1,11 @@
-// Orchestrator: runs the procurement workflow
-// Currently implements Stage 1 (discovery) only.
-// Emits SSE events that map exactly to the frontend callback shapes.
+// Orchestrator: runs the full procurement workflow
+// Stage 1: Discovery (Perplexity Sonar) -> find vendors + contact info -> store in PG
+// Stage 2: Voice calls (ElevenLabs) -> get real quotes -> store offers in PG  [TODO]
+// Stage 3: Negotiation (ElevenLabs round 2) -> negotiate best price             [TODO]
+// Stage 4: Summary -> rank offers, compute savings, emit final result            [TODO]
+//
+// The frontend only sees activity events (what the agent is doing).
+// Quotes and summary are ONLY emitted after real voice calls, not from web search data.
 
 import { prisma } from './db';
 import { emitRunEvent } from './events';
@@ -150,91 +155,117 @@ export async function runOrchestrator(runId: string) {
       console.error('[ORCHESTRATOR] Failed to write discovery to ES (non-fatal):', err);
     }
 
-    // Emit summary activity for discovery
-    const summaryActivityId = makeActivityId();
+    // Emit summary activity for discovery -- categorize vendors by contact method
+    const vendorsWithPhone = createdVendors.filter((v) => v.phone);
+    const vendorsWithEmail = createdVendors.filter((v) => v.email && !v.phone);
+    const vendorsWithFormOnly = createdVendors.filter((v) => !v.phone && !v.email);
+
+    const discoveryAnalysisId = makeActivityId();
     emitRunEvent(runId, {
       type: 'activity',
       payload: {
-        id: summaryActivityId,
+        id: discoveryAnalysisId,
         type: 'analyze',
         title: 'Vendor Discovery Complete',
-        description: `Found ${deduped.length} unique vendors across ${angleLabels.length} search angles. ${createdVendors.filter((v) => v.phone).length} have phone numbers, ${createdVendors.filter((v) => v.email).length} have email.`,
+        description: `Found ${deduped.length} unique vendors across ${angleLabels.length} search angles. ${vendorsWithPhone.length} have phone numbers (ready for calls), ${vendorsWithEmail.length} email-only, ${vendorsWithFormOnly.length} web form only.`,
         timestamp: new Date(),
         status: 'done',
         tool: 'perplexity-sonar',
       },
     });
 
-    // Emit quotes from Perplexity pricing data (as preliminary web-sourced quotes)
-    console.log(`[ORCHESTRATOR] Emitting quotes for vendors with pricing data...`);
-    for (const v of deduped) {
-      if (v.pricing && v.pricing !== 'N/A') {
-        emitRunEvent(runId, {
-          type: 'quote',
-          payload: {
-            supplier: v.name,
-            unitPrice: v.pricing,
-            moq: 'N/A',
-            leadTime: v.leadTime ?? 'N/A',
-            shipping: 'N/A',
-            terms: 'N/A',
-            confidence: 60,
-            source: 'web-search',
-          },
-        });
+    // Log contact breakdown for debugging
+    console.log(`[ORCHESTRATOR] Contact breakdown:`);
+    console.log(`[ORCHESTRATOR]   Phone: ${vendorsWithPhone.length} vendors — ${vendorsWithPhone.map(v => `${v.name}: ${v.phone}`).join(', ')}`);
+    console.log(`[ORCHESTRATOR]   Email only: ${vendorsWithEmail.length} vendors — ${vendorsWithEmail.map(v => `${v.name}: ${v.email}`).join(', ')}`);
+    console.log(`[ORCHESTRATOR]   Form only: ${vendorsWithFormOnly.length} vendors`);
+
+    // ===== STAGE: calling_for_quote (ROUND 1) =====
+    // Transition to calling stage — only vendors with phone numbers can be called
+    console.log(`[ORCHESTRATOR] === STAGE: calling_for_quote ===`);
+    emitRunEvent(runId, { type: 'stage_change', payload: { stage: 'calling_for_quote' } });
+    emitRunEvent(runId, {
+      type: 'services_change',
+      payload: { perplexity: false, elasticsearch: true, openai: false, stagehand: false, elevenlabs: true, visa: false },
+    });
+
+    if (vendorsWithPhone.length === 0) {
+      // No vendors with phone numbers — can't make calls
+      const noPhoneId = makeActivityId();
+      emitRunEvent(runId, {
+        type: 'activity',
+        payload: {
+          id: noPhoneId,
+          type: 'system',
+          title: 'No Callable Vendors',
+          description: `None of the ${deduped.length} discovered vendors had phone numbers. Voice call stage skipped. Consider running discovery again with different search terms.`,
+          timestamp: new Date(),
+          status: 'done',
+          tool: 'orchestrator',
+        },
+      });
+      console.log(`[ORCHESTRATOR] No vendors with phone — skipping call stage`);
+    } else {
+      // Emit activity showing which vendors will be called
+      const callPlanId = makeActivityId();
+      emitRunEvent(runId, {
+        type: 'activity',
+        payload: {
+          id: callPlanId,
+          type: 'call',
+          title: `Preparing to call ${vendorsWithPhone.length} vendors`,
+          description: vendorsWithPhone.map(v => v.name).join(', '),
+          timestamp: new Date(),
+          status: 'running',
+          tool: 'elevenlabs',
+        },
+      });
+
+      // TODO: Stage 3 — trigger ElevenLabs outbound calls here
+      // For each vendor in vendorsWithPhone:
+      //   1. triggerOutboundCall(vendor, runId, spec, round=1)
+      //   2. INSERT call row (round=1, conversationId from response)
+      //   3. emit call_started + calls_change events
+      // Then poll until all round 1 calls complete (webhook sets Call.status)
+
+      console.log(`[ORCHESTRATOR] TODO: ElevenLabs voice calls for ${vendorsWithPhone.length} vendors`);
+      console.log(`[ORCHESTRATOR] Vendors to call:`);
+      for (const v of vendorsWithPhone) {
+        console.log(`[ORCHESTRATOR]   - ${v.name}: ${v.phone}`);
       }
+
+      // Mark call plan as done (calls themselves not yet implemented)
+      emitRunEvent(runId, {
+        type: 'update_activity',
+        payload: { id: callPlanId, updates: { status: 'done', description: `${vendorsWithPhone.length} vendors queued for outbound calls: ${vendorsWithPhone.map(v => v.name).join(', ')}. Awaiting ElevenLabs integration.` } },
+      });
     }
 
-    console.log(`[ORCHESTRATOR] Quotes emitted for ${deduped.filter(v => v.pricing && v.pricing !== 'N/A').length} vendors`);
-
-    // Mark discovery stage complete
-    console.log(`[ORCHESTRATOR] === STAGE: complete ===`);
+    // ===== Mark run as discovery_complete (not fully complete -- calls stage pending) =====
     emitRunEvent(runId, {
       type: 'services_change',
       payload: { perplexity: false, elasticsearch: false, openai: false, stagehand: false, elevenlabs: false, visa: false },
     });
-
-    // For now, mark the run as discovery_complete (later stages will continue from here)
     emitRunEvent(runId, { type: 'stage_change', payload: { stage: 'complete' } });
 
-    // Emit summary
-    const vendorsWithPricing = deduped.filter((v) => v.pricing && v.pricing !== 'N/A');
-    emitRunEvent(runId, {
-      type: 'summary',
-      payload: {
-        suppliersFound: deduped.length,
-        quotesReceived: vendorsWithPricing.length,
-        bestPrice: vendorsWithPricing[0]?.pricing ?? 'N/A',
-        bestSupplier: vendorsWithPricing[0]?.name ?? 'N/A',
-        avgLeadTime: 'N/A',
-        recommendation: `Found ${deduped.length} vendors via Perplexity Sonar. Review the quotes panel for indicative pricing. Next step: voice calls for firm quotes.`,
-        savings: 'N/A',
-        nextSteps: [
-          'Review discovered vendors and their indicative pricing',
-          'Initiate voice calls for firm quotes (coming soon)',
-          'Compare and negotiate with top candidates',
-        ],
-      },
-    });
-
-    // Mark complete
     const systemDoneId = makeActivityId();
     emitRunEvent(runId, {
       type: 'activity',
       payload: {
         id: systemDoneId,
         type: 'system',
-        title: 'Discovery Workflow Complete',
-        description: `Found ${deduped.length} vendors. Indicative pricing captured for ${vendorsWithPricing.length}.`,
+        title: 'Discovery Stage Complete',
+        description: `Found ${deduped.length} vendors. ${vendorsWithPhone.length} have phone numbers ready for voice calls. Next: ElevenLabs outbound calls for firm quotes.`,
         timestamp: new Date(),
         status: 'done',
         tool: 'orchestrator',
       },
     });
 
-    await prisma.run.update({ where: { id: runId }, data: { status: 'complete' } });
+    await prisma.run.update({ where: { id: runId }, data: { status: 'discovery_complete' } });
     console.log(`[ORCHESTRATOR] ========================================`);
-    console.log(`[ORCHESTRATOR] Run ${runId} COMPLETED SUCCESSFULLY`);
+    console.log(`[ORCHESTRATOR] Run ${runId} DISCOVERY COMPLETE`);
+    console.log(`[ORCHESTRATOR] ${vendorsWithPhone.length} vendors ready for voice calls`);
     console.log(`[ORCHESTRATOR] ========================================\n`);
   } catch (err) {
     console.error('[ORCHESTRATOR] FATAL ERROR:', err);

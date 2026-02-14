@@ -1,34 +1,62 @@
 // Perplexity Sonar client for vendor discovery
-// Uses sonar-pro with structured JSON output
+// Uses sonar-pro to find suppliers with verified contact info (phone/email/form)
+// Contact info is critical -- it feeds directly into ElevenLabs voice calls
 
-const DISCOVERY_SYSTEM_PROMPT = `You are a procurement research assistant. Your task is to identify and compare vendors for a specific item and constraints the user will provide. Use up-to-date, high-quality sources, and only include vendors that clearly offer the requested item.
+function buildSystemPrompt(spec: {
+  item: string;
+  quantity: string;
+  leadTime?: string;
+  quality?: string;
+  location?: string;
+  budget?: string;
+}) {
+  return `You are a procurement research assistant. Your task is to identify and compare vendors for a specific item and constraints I will provide. Use up-to-date, high-quality sources, and only include vendors that clearly offer the requested item.
+
+Here are the requirements:
+Item: ${spec.item}
+Quantity: ${spec.quantity || 'Not specified'}
+Maximum total budget (including all fees and taxes if possible): ${spec.budget || 'Not specified'}
+Delivery location: ${spec.location || 'Not specified'}
+Latest acceptable delivery date (item must arrive by): ${spec.leadTime || 'Not specified'}
+Quality / specification constraints: ${spec.quality || 'None specified'}
+Other hard constraints (must-haves): None
+Soft preferences (nice-to-haves): None
 
 Your job:
-- Find legitimate vendors that can supply this item under the given constraints (or as close as possible).
-- Exclude obvious marketplaces or irrelevant results (e.g., blog posts, content farms) unless they point to real vendors.
-- For each vendor, verify from their site or a reliable source that they actually sell the specified item or a very close equivalent.
+Find legitimate vendors that can supply this item under these constraints (or as close as possible).
+Exclude obvious marketplaces or irrelevant results (e.g., blog posts, content farms) unless they point to real vendors.
+For each vendor, verify from their site or a reliable source that:
+- They actually sell the specified item or a very close equivalent.
+- They can ship to the delivery location or plausibly serve that region.
 
-Return ONLY a JSON array (no markdown, no explanation) where each element has these fields:
+The Vendor Name, Website, and Preferred Contact Method are MOST IMPORTANT and must be accurate.
+If phone is their preferred method of contact, indicate that and ENSURE the phone number is found and filled in.
+Vice versa for email. If there is a form or some other contact method on the webpage itself, place the URL from which you can contact the vendor.
+
+CRITICAL: We will be calling these vendors by phone. Finding accurate phone numbers is the highest priority. Check their website "Contact Us" page, footer, Google Business listing, or directory listings. A vendor without a phone number is much less useful to us.
+
+Return ONLY a JSON array (no markdown, no prose, no explanation) with 8-15 vendors. Each element must have these exact fields:
 {
   "name": "Vendor Name",
   "url": "https://vendor-website.com",
-  "phone": "+1234567890 or null",
+  "phone": "+1234567890 or null if truly not found",
   "email": "sales@vendor.com or null",
-  "region": "Where they are located / serve",
+  "region": "Where they are located / serves",
   "match": "How they match the item and quality constraints",
-  "pricing": "Indicative pricing for the requested quantity",
-  "leadTime": "Shipping / lead time information",
+  "pricing": "Indicative pricing for the requested quantity (best available info)",
+  "leadTime": "Shipping / lead time information, especially whether they can meet deadline",
   "notes": "Certifications, notable customers, risks, or limitations",
   "contactMethod": "Phone or Email or Web Form",
-  "formUrl": "URL to contact form if applicable, or null"
+  "formUrl": "URL to contact/quote request form if applicable, or null"
 }
 
-Return 5-10 vendors. Return ONLY the JSON array, nothing else.`;
+Return ONLY the JSON array, nothing else.`;
+}
 
 const DISCOVERY_ANGLES = [
-  'Find top manufacturers and wholesale suppliers for',
-  'Find specialty distributors and certified vendors for',
-  'Find competitive budget-friendly suppliers with fast shipping for',
+  'Find top manufacturers and wholesale suppliers with verified phone numbers for',
+  'Find specialty distributors and certified vendors with direct contact info for',
+  'Find competitive budget-friendly suppliers with sales phone lines for',
 ];
 
 export interface VendorCandidate {
@@ -53,24 +81,16 @@ export interface DiscoveryResult {
 }
 
 export async function discoverVendors(
-  spec: { item: string; quantity: string; leadTime?: string; quality?: string; location?: string },
+  spec: { item: string; quantity: string; leadTime?: string; quality?: string; location?: string; budget?: string },
   angle: string = ''
 ): Promise<DiscoveryResult> {
-  const userMessage = [
-    angle,
-    spec.item,
-    spec.quantity ? `Quantity: ${spec.quantity}` : '',
-    spec.leadTime ? `Lead time: ${spec.leadTime}` : '',
-    spec.quality ? `Quality/certs: ${spec.quality}` : '',
-    spec.location ? `Delivery location: ${spec.location}` : '',
-  ]
-    .filter(Boolean)
-    .join('. ');
+  // The system prompt has the full spec baked in; the user message is just the search angle
+  const systemPrompt = buildSystemPrompt(spec);
+  const userMessage = `${angle} ${spec.item}. Find vendors with verified phone numbers and direct contact information.`;
 
   console.log(`[PERPLEXITY] discoverVendors() called — angle="${angle.slice(0, 50)}..."`);
   console.log(`[PERPLEXITY] User message: "${userMessage.slice(0, 120)}..."`);
   console.log(`[PERPLEXITY] API key present:`, !!process.env.PERPLEXITY_API_KEY);
-  console.log(`[PERPLEXITY] API key prefix:`, process.env.PERPLEXITY_API_KEY?.slice(0, 8) + '...');
 
   const res = await fetch('https://api.perplexity.ai/chat/completions', {
     method: 'POST',
@@ -81,7 +101,7 @@ export async function discoverVendors(
     body: JSON.stringify({
       model: 'sonar-pro',
       messages: [
-        { role: 'system', content: DISCOVERY_SYSTEM_PROMPT },
+        { role: 'system', content: systemPrompt },
         { role: 'user', content: userMessage },
       ],
     }),
@@ -135,7 +155,7 @@ export async function discoverVendors(
 }
 
 export async function runDiscoveryLoop(
-  spec: { item: string; quantity: string; leadTime?: string; quality?: string; location?: string },
+  spec: { item: string; quantity: string; leadTime?: string; quality?: string; location?: string; budget?: string },
   onProgress?: (angle: string, vendors: VendorCandidate[], citations: string[]) => void
 ): Promise<VendorCandidate[]> {
   console.log(`[PERPLEXITY] runDiscoveryLoop() started — item="${spec.item}", quantity="${spec.quantity}"`);

@@ -68,21 +68,15 @@ export async function retrieveMemory(
 
   return client.search({
     index: INDEX_NAME,
-    body: {
-      retriever: {
-        standard: {
-          query: {
-            bool: {
-              must: [
-                { semantic: { field: 'text', query } },
-                ...must,
-              ],
-            },
-          },
-        },
+    query: {
+      bool: {
+        must: [
+          { match: { text: { query } } },
+          ...must,
+        ],
       },
-      size: 5,
     },
+    size: 5,
   });
 }
 
