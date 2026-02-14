@@ -1,370 +1,690 @@
-# Agentic Procurement Platform — Backend Implementation Plan
+# Procurement Agent: Real Backend Plan
 
-## Problem Summary
+## Current State
 
-Build the backend for an AI-powered procurement system. A user submits a natural-language request (e.g. *"Get me $1000 worth of tungsten by Wednesday morning to Stanford campus"*). The platform autonomously:
+The app has a polished Next.js frontend ([`src/app/page.js`](src/app/page.js)) with a chat intake, live activity feed, voice call panel, quotes panel, and summary panel. All backend behavior is faked via `setTimeout` chains in [`src/lib/agent-store.js`](src/lib/agent-store.js). No API routes, no database, no external integrations exist yet.
 
-1. **Extracts** structured constraints (item, budget, deadline, location)
-2. **Discovers** vendors via Perplexity Sonar
-3. **Scrapes** vendor websites via Browserbase Stagehand
-4. **Negotiates** via phone (ElevenLabs) or email (Resend)
-5. **Stores** all interactions in long-term memory (Elasticsearch)
-6. **Ranks** offers with weighted scoring
-7. **Optionally auto-purchases** via Coinbase x402
-8. **Reports** a full structured run summary with audit trail
+The frontend already defines clean data shapes via its callback pattern:
 
-> [!IMPORTANT]
-> **Frontend is a placeholder only** — the user's teammate owns the frontend. We will create a single minimal page that proves the API works.
+- `activities`: `{id, type, title, description, timestamp, status, tool, parallelGroup}`
+- `quotes`: `{supplier, unitPrice, moq, leadTime, shipping, terms, confidence, source}`
+- `calls`: `{id, active, supplier, duration, status, subActions?}`
+- `summary`: `{suppliersFound, quotesReceived, bestPrice, bestSupplier, avgLeadTime, recommendation, savings, nextSteps}`
+
+The plan preserves all existing components unchanged and replaces only the data source.
 
 ---
 
-## Technology Stack
+## Architecture
 
-| Layer | Technology | Purpose |
-|---|---|---|
-| Host / API | **Next.js App Router on Vercel** | Serverless route handlers |
-| LLM Orchestration | **OpenAI** | Structured extraction, routing, final reports |
-| Web Discovery | **Perplexity Sonar API** | Grounded vendor search with citations |
-| Website Actions | **Browserbase + Stagehand** | Observe / extract / act on vendor pages |
-| Voice Negotiation | **ElevenLabs Agents + Twilio** | Multi-turn outbound phone calls |
-| Email Outreach | **Resend API** | RFQ emails when phone unavailable |
-| Long-term Memory | **Elastic Cloud** | Hybrid vector + metadata retrieval (semantic text + embeddings) |
-| Operational DB | **Vercel Postgres** | Runs, offers, events, vendors, payments (structured transactional data) |
-| Payment | **Coinbase x402** | Programmatic stablecoin purchase |
+```mermaid
+sequenceDiagram
+    participant UI as NextJS_Frontend
+    participant API as API_Routes
+    participant PG as PostgreSQL
+    participant ES as Elastic_Cloud
+    participant Sonar as Perplexity_Sonar
+    participant EL as ElevenLabs_Twilio
+
+    UI->>API: POST /api/run (rfq)
+    API->>PG: INSERT run
+    API-->>UI: {runId}
+    UI->>API: GET /api/run/[runId]/events (SSE)
+
+    Note over API: STAGE 1 - Discovery Loop
+    loop N Sonar calls to accumulate vendors
+        API->>Sonar: chat/completions (varied angle)
+        Sonar-->>API: vendors + citations
+        API->>PG: INSERT vendors (dedupe by name+phone)
+        API->>ES: INDEX discovery text
+        API-->>UI: SSE: vendors_discovered
+    end
+
+    Note over API: STAGE 2 - Round 1 Initial Quote Calls
+    loop For each vendor with phone
+        API->>EL: POST outbound-call (initial quote prompt)
+        EL-->>API: {conversation_id}
+        API->>PG: INSERT call (round=1)
+        API-->>UI: SSE: call_started
+    end
+
+    loop Webhooks arrive
+        EL->>API: POST /api/webhooks/elevenlabs
+        API->>PG: UPDATE call + INSERT offer
+        API->>ES: INDEX transcript
+        API-->>UI: SSE: offer_extracted
+    end
+
+    Note over API: STAGE 3 - Round 2 Negotiation Calls
+    API->>PG: Find best price from round 1
+    loop For each vendor above best price
+        API->>EL: POST outbound-call (negotiate prompt with best price)
+        API-->>UI: SSE: negotiation_call_started
+    end
+
+    loop Webhooks arrive
+        EL->>API: POST /api/webhooks/elevenlabs
+        API->>PG: UPDATE offer with negotiated price
+        API-->>UI: SSE: negotiation_result
+    end
+
+    API->>PG: SELECT all offers, rank
+    API-->>UI: SSE: summary
+```
 
 ---
 
-## User Review Required
+## Folder Structure (MVP -- no extras)
 
-> [!WARNING]
-> **API keys needed before execution.** You will need to provide (or set as env vars in Vercel) keys for: OpenAI, Perplexity, Browserbase/Stagehand, ElevenLabs, Elastic Cloud, Resend, and optionally Coinbase. I will scaffold `.env.example` with all required vars.
+```
+src/
+  app/
+    page.js                              # MODIFY: replace simulateWorkflow with SSE
+    layout.js                            # unchanged
+    api/
+      setup/route.ts                     # one-time: create ES indices
+      run/route.ts                       # POST: create run, kick off orchestrator
+      run/[runId]/events/route.ts        # GET: SSE stream
+      webhooks/elevenlabs/route.ts       # POST: post-call transcript
+  lib/
+    db.ts                                # Prisma singleton
+    elastic.ts                           # ES client + index/query helpers
+    perplexity.ts                        # Sonar API: discoverVendors()
+    elevenlabs.ts                        # outbound call trigger
+    orchestrator.ts                      # workflow engine (core)
+    events.ts                            # in-memory EventEmitter hub for SSE
+  prisma/
+    schema.prisma                        # PG schema (4 models, no Event)
+  components/                            # ALL UNCHANGED
+```
 
-> [!IMPORTANT]
-> **Hosting:** Everything runs on **Vercel** — Vercel Postgres for the operational DB, Elastic Cloud for semantic memory, Vercel serverless functions for all API routes.
+**What is cut:**
+
+- No Zod, no types file, no validation -- plain objects everywhere
+- No Event model in PG -- events are fire-and-forget via in-memory EventEmitter
+- No HMAC signature verification on webhooks
+- No SSE catch-up replay -- live stream only
+- No Stagehand/Browserbase -- Sonar handles discovery
+- No Visa/Coinbase payments -- mock the payment stage
+- No multi-user tenancy -- single user for hackathon
 
 ---
 
-## Proposed Changes
+## 1. Dependencies to Install
 
-### Phase 1 — Project Skeleton & Core Orchestration
+```bash
+npm install @prisma/client @elastic/elasticsearch
+npm install -D prisma
+```
 
-#### [NEW] Project initialization
+That's it. No Zod, no validation libraries. Perplexity Sonar and ElevenLabs are plain `fetch()` calls -- no SDKs. Plain objects everywhere.
 
-- `npx create-next-app@latest ./` with App Router, TypeScript, ESLint
-- Install dependencies: `openai`, `@vercel/postgres`, `@elastic/elasticsearch`, `uuid`
-- Create `.env.example` listing all required API keys
+---
 
-#### [NEW] [schema.sql](file:///Users/andrewfong/Downloads/treehacks2026/db/schema.sql)
+## 2. PostgreSQL Schema (Prisma)
 
-PostgreSQL schema with tables:
+File: `prisma/schema.prisma`
 
-| Table | Purpose |
-|---|---|
-| `runs` | Top-level procurement run (id, raw_query, parsed_spec, status, timestamps) |
-| `vendors` | Discovered vendor candidates (run_id, name, url, phone, email, source) |
-| `offers` | Normalized offers (vendor_id, unit_price, total_price, delivery_days, validity, confidence, evidence_ref) |
-| `events` | Stage-transition log for SSE timeline (run_id, stage, payload, timestamp) |
-| `calls` | ElevenLabs call records (vendor_id, transcript, quoted_total, duration) |
-| `emails` | Email thread records (vendor_id, subject, body, status) |
-| `purchases` | Payment execution records (offer_id, method, tx_hash, status) |
+```prisma
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
 
-#### [NEW] [route.ts](file:///Users/andrewfong/Downloads/treehacks2026/src/app/api/procure/start/route.ts)
+generator client {
+  provider = "prisma-client-js"
+}
 
-`POST /api/procure/start` — accepts raw query string, calls OpenAI for structured extraction into a `ProcurementSpec` JSON object.
+model Run {
+  id         String   @id @default(cuid())
+  rawQuery   String
+  parsedSpec Json     // {item, quantity, leadTime, quality, location}
+  status     String   @default("pending")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  vendors    Vendor[]
+}
 
-**Clarification loop:** The endpoint checks whether all **required fields** are populated. If any are missing or ambiguous, it returns a `status: "needs_clarification"` response with specific follow-up questions. The frontend reprompts the user and re-submits. This loop repeats until the spec is complete. Only then does the run enter `status: "ready"` and get stored in the DB.
+model Vendor {
+  id        String   @id @default(cuid())
+  runId     String
+  run       Run      @relation(fields: [runId], references: [id])
+  name      String
+  url       String?
+  phone     String?
+  email     String?
+  source    String   // "sonar"
+  sourceUrl String?  // citation URL from Sonar
+  metadata  Json?
+  createdAt DateTime @default(now())
+  offers    Offer[]
+  calls     Call[]
+}
 
-**Required procurement fields (all must be resolved before proceeding):**
+model Offer {
+  id           String   @id @default(cuid())
+  vendorId     String
+  vendor       Vendor   @relation(fields: [vendorId], references: [id])
+  unitPrice    Float?
+  moq          String?
+  leadTimeDays Int?
+  shipping     String?
+  terms        String?
+  confidence   Int?
+  source       String   // "voice-call"
+  rawEvidence  String?  // transcript excerpt
+  createdAt    DateTime @default(now())
+}
 
-| # | Field | Type | Description | Example |
-|---|---|---|---|---|
-| 1 | `item` | string | What to procure — must be specific enough to search vendors | `"tungsten rod, 99.95% purity"` |
-| 2 | `budget` | `{ amount, currency }` | Maximum spend — must have a numeric amount and currency | `{ "amount": 1000, "currency": "USD" }` |
-| 3 | `deadline_iso` | ISO 8601 datetime | When the item must arrive by — must be a concrete date/time, not vague | `"2026-02-18T08:00:00-08:00"` |
-| 4 | `delivery_location` | string | Where to deliver — must be a real address or recognizable location | `"Stanford Campus, 450 Serra Mall, CA 94305"` |
-| 5 | `quantity` | number \| null | How many/how much — if the item is countable, this must be specified; null only if budget implicitly defines quantity (e.g. "$1000 worth of") | `5` or `null` |
-| 6 | `quality_constraints` | string[] | Any specs, grades, certifications, or material requirements | `["99.95% purity", "ASTM B760"]` |
-| 7 | `auto_purchase` | boolean | Whether the system is authorized to buy autonomously or must ask first | `false` |
-
-**Clarification response contract:**
-```json
-{
-  "status": "needs_clarification",
-  "parsed_so_far": {
-    "item": "tungsten",
-    "budget": { "amount": 1000, "currency": "USD" },
-    "deadline_iso": null,
-    "delivery_location": "Stanford Campus, CA",
-    "quantity": null,
-    "quality_constraints": [],
-    "auto_purchase": null
-  },
-  "questions": [
-    "When do you need this delivered by? Please provide a specific date and time.",
-    "Do you need a specific quantity, or should I maximize what $1000 can buy?",
-    "Are there any purity, grade, or certification requirements?",
-    "Should I auto-purchase the best option, or present recommendations for your approval first?"
-  ]
+model Call {
+  id             String   @id @default(cuid())
+  vendorId       String
+  vendor         Vendor   @relation(fields: [vendorId], references: [id])
+  runId          String   // denormalized for quick lookup in webhook
+  round          Int      @default(1) // 1 = initial quote, 2 = negotiation
+  conversationId String?  @unique // ElevenLabs conversation_id
+  transcript     String?
+  status         String   @default("pending")
+  duration       Int?
+  createdAt      DateTime @default(now())
 }
 ```
 
-**Ready response contract:**
-```json
-{
-  "status": "ready",
-  "run_id": "run_abc123",
-  "spec": {
-    "item": "tungsten rod, 99.95% purity",
-    "budget": { "amount": 1000, "currency": "USD" },
-    "deadline_iso": "2026-02-18T08:00:00-08:00",
-    "delivery_location": "Stanford Campus, 450 Serra Mall, CA 94305",
-    "quantity": null,
-    "quality_constraints": ["99.95% purity"],
-    "auto_purchase": false
-  },
-  "confidence": 0.95
+No `Event` model -- events are fire-and-forget via the in-memory EventEmitter. No persistence needed for a demo.
+
+Key design choice: `Call.runId` is denormalized so the ElevenLabs webhook can look up the run directly from `conversationId` without joining through Vendor.
+
+---
+
+## 3. Elasticsearch Index (semantic_text)
+
+File: `src/lib/elastic.ts`
+
+Use a **single index** `proc_memory` with the `semantic_text` field type. This is the critical simplification -- `semantic_text` auto-chunks long text and auto-generates embeddings inside Elastic Cloud serverless. No BYO embeddings, no ingest pipelines, no extra API calls.
+
+```typescript
+import { Client } from '@elastic/elasticsearch';
+
+const client = new Client({
+  node: process.env.ELASTIC_URL,
+  auth: { apiKey: process.env.ELASTIC_API_KEY },
+  serverMode: 'serverless',
+});
+
+// Called once via /api/setup
+async function createIndex() {
+  await client.indices.create({
+    index: 'proc_memory',
+    mappings: {
+      properties: {
+        text:       { type: 'semantic_text' },
+        run_id:     { type: 'keyword' },
+        vendor_id:  { type: 'keyword' },
+        channel:    { type: 'keyword' },  // "search" | "call" | "note"
+        created_at: { type: 'date' },
+      }
+    }
+  });
+}
+
+// Write a memory document
+async function writeMemory(doc) {
+  await client.index({
+    index: 'proc_memory',
+    document: doc,
+    timeout: '5m',  // semantic_text may need model warmup
+  });
+}
+
+// Retrieve relevant memories
+async function retrieveMemory(query, filters = {}) {
+  const must = [];
+  if (filters.vendor_id) must.push({ term: { vendor_id: filters.vendor_id } });
+  if (filters.run_id)    must.push({ term: { run_id: filters.run_id } });
+
+  return client.search({
+    index: 'proc_memory',
+    body: {
+      retriever: {
+        standard: {
+          query: {
+            bool: {
+              must: [
+                { semantic: { field: 'text', query } },
+                ...must,
+              ]
+            }
+          }
+        }
+      },
+      size: 5,
+    }
+  });
 }
 ```
 
-#### [NEW] [route.ts](file:///Users/andrewfong/Downloads/treehacks2026/src/app/api/procure/[runId]/events/route.ts)
-
-`GET /api/procure/:runId/events` — SSE endpoint. Polls `events` table and streams `RunEvent` objects to the client in real time.
-
-#### [NEW] [page.tsx](file:///Users/andrewfong/Downloads/treehacks2026/src/app/page.tsx)
-
-Minimal placeholder frontend: a text input + submit button that calls `/api/procure/start` and displays the returned `run_id`. **This is a stub** — the real UI will be swapped in by a teammate.
-
-#### [NEW] Shared types & utilities
-
-- `src/lib/types.ts` — TypeScript interfaces (`ProcurementSpec`, `Vendor`, `Offer`, `RunEvent`, `OutreachContext`, etc.)
-- `src/lib/db.ts` — Vercel Postgres client (uses `@vercel/postgres`)
-- `src/lib/openai.ts` — OpenAI client wrapper with structured output helpers
-- `src/lib/events.ts` — `emitEvent(runId, stage, payload)` helper
+**Potential issue addressed:** First `writeMemory` call after deploy may be slow (~30-60s) as Elastic loads the embedding model. The `timeout: '5m'` handles this. Subsequent writes are fast.
 
 ---
 
-### Phase 2 — Discovery & Site Inspection
+## 4. Perplexity Sonar Client (Multi-Conversation Discovery Loop)
 
-#### [NEW] [route.ts](file:///Users/andrewfong/Downloads/treehacks2026/src/app/api/procure/[runId]/discover/route.ts)
+File: `src/lib/perplexity.ts`
 
-`POST /api/procure/:runId/discover` — calls Perplexity Sonar API (`POST https://api.perplexity.ai/chat/completions`, model `sonar` or `sonar-pro` based on complexity heuristic). Parses citations/search_results. Inserts vendor candidates into `vendors` table.
+Plain `fetch()`. Use `response_format: { type: "json_object" }` to get JSON back (simpler than json_schema, no schema needed). Citations come as a top-level `citations` array on the response object (NOT inside `choices`).
 
-#### [NEW] [route.ts](file:///Users/andrewfong/Downloads/treehacks2026/src/app/api/procure/[runId]/vendor/[vendorId]/scrape/route.ts)
+The discovery loop calls Sonar **multiple times** with varied angles to accumulate vendors. Results deduped by name before inserting into Postgres.
 
-`POST /api/procure/:runId/vendor/:vendorId/scrape` — uses Stagehand to `goto` vendor URL, `observe` the page, and `extract` structured data (price, MOQ, ETA, payment methods, contact info). Updates vendor record.
+````typescript
+// Placeholder prompts -- fill in later
+const DISCOVERY_SYSTEM_PROMPT = '';  // TODO
+const DISCOVERY_ANGLES = ['', '', ''];  // TODO
 
-#### [NEW] Perplexity & Stagehand client wrappers
+async function discoverVendors(spec, angle = '') {
+  const res = await fetch('https://api.perplexity.ai/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${process.env.PERPLEXITY_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: 'sonar-pro',
+      messages: [
+        { role: 'system', content: DISCOVERY_SYSTEM_PROMPT },
+        { role: 'user', content: `${angle} ${spec.item} ${spec.quantity}` },
+      ],
+    }),
+  });
+  const data = await res.json();
+  // Best-effort parse -- content might be JSON or text with JSON in it
+  let vendors = [];
+  try {
+    const raw = data.choices[0].message.content;
+    vendors = JSON.parse(raw.replace(/```json?\n?/g, '').replace(/```/g, ''));
+  } catch { vendors = []; }
+  const citations = data.citations ?? [];
+  return { vendors, citations };
+}
 
-- `src/lib/perplexity.ts` — Sonar API call + response parser
-- `src/lib/stagehand.ts` — Browserbase session management + extraction helpers
+// Runs the loop -- called by orchestrator
+async function runDiscoveryLoop(spec) {
+  const allVendors = [];
+  for (const angle of DISCOVERY_ANGLES) {
+    const { vendors, citations } = await discoverVendors(spec, angle);
+    allVendors.push(...vendors.map((v, i) => ({
+      ...v, sourceUrl: citations[i] ?? null,
+    })));
+  }
+  // Simple dedupe by name
+  const seen = new Set();
+  return allVendors.filter(v => {
+    const key = v.name?.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+````
 
----
-
-### Phase 3 — Outreach Integration (Memory-Augmented)
-
-> [!IMPORTANT]
-> **Context-loading before every outreach action.** Both call and email endpoints first assemble an `OutreachContext` by:
-> 1. **Elasticsearch read** — retrieve semantically similar past interactions (prior quotes, negotiation transcripts, vendor behavior notes) via hybrid kNN + filter query
-> 2. **PostgreSQL read** — load structured transactional data (current run spec, this vendor's scraped data, competing offers from other vendors in same run, prior offer history)
-> 3. Both are merged into a single `OutreachContext` object and fed to the ElevenLabs agent (as dynamic variables) or used to compose the email body.
-
-> [!IMPORTANT]
-> **Write-back after every outreach action.** After a call or email completes:
-> 1. The transcript / email content is written to Elasticsearch — **Jina embeddings are generated automatically** via the Elastic Inference API ingest pipeline (no separate embedding call needed)
-> 2. Written to Elasticsearch indices (`proc_call_transcripts` or `proc_email_threads`) with auto-generated embedding + metadata
-> 3. Any extracted offer facts are written to `proc_offer_facts` index
-> 4. Vendor behavior notes are updated in `proc_vendor_memory`
-> 5. Structured records (call/email/offer rows) are written to PostgreSQL
-
-#### [NEW] [route.ts](file:///Users/andrewfong/Downloads/treehacks2026/src/app/api/procure/[runId]/vendor/[vendorId]/call/route.ts)
-
-`POST /api/procure/:runId/vendor/:vendorId/call` — **Step 1:** calls `assembleOutreachContext()` to load from Elasticsearch + PostgreSQL. **Step 2:** triggers ElevenLabs outbound call via `POST /v1/convai/twilio/outbound-call` with context injected as dynamic variables. **Step 3:** stores call record in PostgreSQL.
-
-#### [NEW] [route.ts](file:///Users/andrewfong/Downloads/treehacks2026/src/app/api/procure/[runId]/vendor/[vendorId]/email/route.ts)
-
-`POST /api/procure/:runId/vendor/:vendorId/email` — **Step 1:** calls `assembleOutreachContext()` to load from Elasticsearch + PostgreSQL. **Step 2:** uses OpenAI to compose a context-aware RFQ email grounded in prior interactions. **Step 3:** sends via Resend API. **Step 4:** writes the sent email to Elasticsearch (Jina auto-embeds via inference pipeline) + PostgreSQL.
-
-#### [NEW] [route.ts](file:///Users/andrewfong/Downloads/treehacks2026/src/app/api/webhooks/elevenlabs/route.ts)
-
-`POST /api/webhooks/elevenlabs` — receives post-call webhook from ElevenLabs. **Step 1:** parses transcript. **Step 2:** extracts quoted price/terms via OpenAI. **Step 3:** writes transcript to Elasticsearch (auto-embedded by Jina inference pipeline into `proc_call_transcripts` + `proc_offer_facts`). **Step 4:** updates PostgreSQL call record and creates an Offer row.
-
-#### [NEW] Outreach helpers
-
-- `src/lib/elevenlabs.ts` — ElevenLabs agent creation + outbound call trigger
-- `src/lib/email.ts` — Resend email helper + context-aware RFQ composer
-- `src/lib/outreach.ts` — Channel selector logic + `assembleOutreachContext()` function
-
----
-
-### Phase 4 — Memory & Ranking
-
-> [!NOTE]
-> Elasticsearch setup and memory helpers are built in Phase 2-3 implicitly (needed for outreach context). This phase focuses on the **ranking engine** and ensures all memory indices are properly configured.
-
-#### [NEW] Elasticsearch index setup (Elastic Cloud + Jina Inference)
-
-- `src/lib/elastic.ts` — Elastic Cloud client (uses `@elastic/elasticsearch` with cloud auth)
-- `src/lib/memory.ts` — `writeTranscript()`, `writeEmailThread()`, `writeOfferFact()`, `writeVendorNote()`, `retrieveRelevantMemory()`
-- **Jina inference endpoint** — created via `PUT /_inference/text_embedding/jina-embed` with `jinaai` service and model `jina-embeddings-v3`. This endpoint is attached to an **ingest pipeline** so documents are automatically embedded on write — no manual embedding calls needed.
-- Indices: `proc_call_transcripts`, `proc_email_threads`, `proc_offer_facts`, `proc_vendor_memory`
-- Mappings include `dense_vector` (1024 dims for Jina v3, cosine) + keyword/text/date fields
-
-#### [NEW] [route.ts](file:///Users/andrewfong/Downloads/treehacks2026/src/app/api/procure/[runId]/rank/route.ts)
-
-`POST /api/procure/:runId/rank` — loads all offers for the run, applies weighted scoring. Hard-rejects offers that violate budget or deadline. Returns ranked list with scores.
-
-**Scoring formula:** `score = 0.45 × price_score + 0.30 × deadline_score + 0.20 × reliability_score + 0.05 × payment_score`
-
-#### Factor 1: Price Competitiveness (45%)
-
-**How it's computed:** Normalize all offer total prices within the run relative to the budget.
-```
-price_score = 1 - (offer_total / budget_amount)
-```
-Clamped to `[0, 1]`. An offer exactly at budget = 0.0. An offer at half the budget = 0.5. Offers exceeding budget are **hard-rejected** (not scored at all).
-
-#### Factor 2: Deadline Fit Confidence (30%)
-
-**How it's computed:** Compare the vendor's stated delivery ETA against the user's deadline.
-```
-days_margin = deadline_date - (now + delivery_days)
-if days_margin < 0: HARD REJECT
-if days_margin >= 3: deadline_score = 1.0
-else: deadline_score = days_margin / 3.0
-```
-Additionally penalized by a **confidence multiplier** from the source: if the ETA came from a phone negotiation (high confidence, ×1.0), scraped from a product page (medium, ×0.8), or inferred by the LLM (low, ×0.6).
-
-#### Factor 3: Vendor Reliability History (20%)
-
-**How it's computed:** This is the most nuanced factor. It's derived from the `proc_vendor_memory` Elasticsearch index, which accumulates data across *all* runs (not just the current one). The reliability score is a weighted composite of **5 signals**:
-
-| Sub-signal | Weight | Source | Computation |
-|---|---|---|---|
-| **Quote consistency** | 30% | `proc_offer_facts` | Compare this vendor's current quote to their historical quotes for the same/similar items. Low variance = high score. `1 - min(stdev(historical_prices) / mean(historical_prices), 1)` |
-| **Response rate** | 25% | `proc_vendor_memory` tags | Fraction of outreach attempts (calls + emails) that received a substantive response. `responses / attempts` |
-| **Fulfillment track record** | 20% | `proc_vendor_memory` incident notes | Count of past successful deliveries vs. reported issues (late, wrong item, quality). `successes / (successes + incidents)`. Defaults to 0.5 for new vendors (no history) |
-| **Response speed** | 15% | `proc_vendor_memory` response_time_stats | Average time from outreach to substantive response. Normalized: ≤1hr = 1.0, ≤24hr = 0.5, >24hr = 0.2 |
-| **Negotiation behavior** | 10% | `proc_call_transcripts` + `proc_email_threads` | Semantic analysis (via OpenAI) of past negotiation transcripts: did the vendor honor quoted prices? Were there surprise fees or last-minute changes? Binary flag averaged over interactions |
-
-```
-reliability_score = 0.30 × quote_consistency
-                  + 0.25 × response_rate
-                  + 0.20 × fulfillment_record
-                  + 0.15 × response_speed
-                  + 0.10 × negotiation_behavior
-```
-
-**Cold-start handling:** For vendors with no prior history, `reliability_score` defaults to **0.5** (neutral). This means new vendors aren't penalized, but known-reliable vendors get a meaningful boost.
-
-#### Factor 4: Payment Automation Compatibility (5%)
-
-**How it's computed:** Binary check with a small gradient.
-```
-if vendor supports x402/crypto checkout: payment_score = 1.0
-else if vendor has online checkout (credit card): payment_score = 0.5
-else (invoice/manual payment only): payment_score = 0.0
-```
-This factor is intentionally low-weight — it's a tiebreaker, not a decision driver.
+**Potential issue addressed:** Sonar sometimes wraps JSON in markdown fences. The `replace` strips those. If parsing fails entirely, we just get an empty array and move on -- no crash.
 
 ---
 
-### Phase 5 — Purchase, Payment & Hardening
+## 5. ElevenLabs Voice Client (Two-Round Calling)
 
-#### [NEW] [route.ts](file:///Users/andrewfong/Downloads/treehacks2026/src/app/api/procure/[runId]/purchase/route.ts)
+File: `src/lib/elevenlabs.ts`
 
-`POST /api/procure/:runId/purchase` — checks policy gates (user opt-in via `auto_purchase` field, offer validity, budget ceiling), then attempts payment through a **two-tier strategy:**
+The same `triggerOutboundCall` function handles both rounds. The difference is the `round` field and the `dynamic_variables` passed -- round 2 includes the best competing price for the negotiation prompt. The ElevenLabs agent uses dynamic variables in its prompt template, so the agent's behavior changes based on what we inject.
 
-**Tier 1 — Coinbase x402 (preferred):** If vendor supports programmatic crypto/stablecoin checkout, execute payment via x402 protocol. Instant, fully automated, auditable.
+```typescript
+// Placeholder prompts configured in ElevenLabs dashboard
+// Round 1 agent: uses {{item}}, {{quantity}}, {{deadline}} to ask for a quote
+// Round 2 agent: uses {{item}}, {{bestPrice}}, {{bestSupplier}} to negotiate
 
-**Tier 2 — Traditional checkout via Stagehand (fallback):** If x402 is not available but the vendor has an online checkout (credit card, PayPal, etc.), use Browserbase Stagehand to:
-1. `goto` the vendor's checkout/cart page
-2. `observe` the checkout form fields
-3. `act` to fill in shipping address, quantity, and payment details
-4. `act` to submit the order
-5. `extract` the confirmation number / order ID from the confirmation page
+async function triggerOutboundCall(vendor, runId, spec, round = 1, negotiationContext = {}) {
+  const dynamicVars = {
+    runId,
+    vendorId: vendor.id,
+    vendorName: vendor.name,
+    item: spec.item,
+    quantity: spec.quantity,
+    deadline: spec.leadTime,
+    round: String(round),
+    // Round 2 negotiation data (empty for round 1)
+    bestPrice: negotiationContext.bestPrice ?? '',
+    bestSupplier: negotiationContext.bestSupplier ?? '',
+    targetPrice: negotiationContext.targetPrice ?? '',
+  };
 
-Payment credentials (card number, etc.) are stored as encrypted Vercel environment variables and only accessed server-side during the Stagehand session.
+  const res = await fetch(
+    'https://api.elevenlabs.io/v1/convai/twilio/outbound-call',
+    {
+      method: 'POST',
+      headers: {
+        'xi-api-key': process.env.ELEVENLABS_API_KEY,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        agent_id: round === 1
+          ? process.env.ELEVENLABS_AGENT_ID_QUOTE      // agent for initial quoting
+          : process.env.ELEVENLABS_AGENT_ID_NEGOTIATE,  // agent for negotiation
+        agent_phone_number_id: process.env.ELEVENLABS_PHONE_NUMBER_ID,
+        to_number: vendor.phone,
+        conversation_initiation_client_data: {
+          dynamic_variables: dynamicVars,
+        },
+      }),
+    }
+  );
+  return res.json(); // contains conversation_id
+}
+```
 
-**No automated payment:** If neither tier is available (e.g. vendor requires phone/invoice payment), the purchase step records `status: "manual_required"` with instructions for the user and skips to finalize.
+**Two separate ElevenLabs agents** (or one agent with round-aware prompt logic via dynamic variables):
 
-All payment attempts are recorded in the `purchases` table with method, status, and transaction reference.
+- **Quote Agent** (`ELEVENLABS_AGENT_ID_QUOTE`): Placeholder prompt -- asks vendor for price, MOQ, lead time, shipping, payment terms for `{{item}}` x `{{quantity}}`.
+- **Negotiate Agent** (`ELEVENLABS_AGENT_ID_NEGOTIATE`): Placeholder prompt -- tells vendor we received `{{bestPrice}}` from another supplier for `{{item}}`, asks if they can match or beat it.
 
-#### [NEW] [route.ts](file:///Users/andrewfong/Downloads/treehacks2026/src/app/api/procure/[runId]/finalize/route.ts)
+Both agents are configured in the ElevenLabs dashboard with empty/placeholder system prompts. Dynamic variables are injected at call time.
 
-`POST /api/procure/:runId/finalize` — OpenAI generates structured JSON + markdown executive summary. Stores final report. Emits completion event.
-
-#### [NEW] Hardening utilities
-
-- `src/lib/idempotency.ts` — idempotency key generation for outbound actions
-- `src/lib/guardrails.ts` — budget ceiling enforcement, kill switch for active runs
-- `src/lib/x402.ts` — Coinbase x402 payment client wrapper
+**Potential issue addressed:** The API recently changed from `from_number` to `agent_phone_number_id`. Using the current parameter name. Using separate agent IDs keeps the prompt logic clean -- no need for conditional branching inside one agent.
 
 ---
 
-## File Structure (backend focus)
+## 6. In-Memory Event Bus for SSE
+
+File: `src/lib/events.ts`
+
+```typescript
+import { EventEmitter } from 'events';
+
+// Global singleton survives HMR in dev
+const globalForEvents = globalThis as any;
+export const eventBus: EventEmitter =
+  globalForEvents.__eventBus ?? (globalForEvents.__eventBus = new EventEmitter());
+eventBus.setMaxListeners(100);
+
+export function emitRunEvent(runId, event) {
+  eventBus.emit(`run:${runId}`, event);
+}
+```
+
+This is the simplest possible approach for SSE. No Redis, no external pub/sub. Works perfectly for single-instance hackathon deployment.
+
+---
+
+## 7. API Routes
+
+### POST /api/run/route.ts
+
+- Read `req.json()` directly -- no validation
+- Creates `Run` in Postgres
+- Kicks off orchestrator as `void runOrchestrator(runId)` (fire-and-forget async)
+- Returns `{ runId }` immediately
+
+### GET /api/run/[runId]/events/route.ts
+
+- Returns SSE `ReadableStream`
+- Subscribes to `eventBus.on("run:{runId}")`
+- On client disconnect (`req.signal.abort`), unsubscribes
+- Live stream only -- no catch-up replay
+
+### POST /api/webhooks/elevenlabs/route.ts
+
+Critical glue between ElevenLabs and the orchestrator's poll loop. No auth, no HMAC -- just parse and process:
+
+1. Return `NextResponse.json({ ok: true })` (200) **immediately**
+2. In a detached async (or `waitUntil`), do the real work:
+
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                - Parse body, grab `conversation_id` and transcript
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                - Look up `Call` by `conversationId` -- gives us `runId`, `vendorId`, `round`
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                - Store transcript in `Call.transcript`, set `Call.status = "completed"`
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                - Create a placeholder `Offer` row (just raw transcript, no real extraction yet)
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                - Index transcript text into ES
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                - Emit SSE events: `quote`, `calls_change`
+
+**Potential issue addressed:** ElevenLabs auto-disables webhooks after 10 consecutive failures. Handler returns 200 first, all processing after is wrapped in try/catch so it never crashes.
+
+---
+
+## 8. Orchestrator (Core Engine)
+
+File: `src/lib/orchestrator.ts`
+
+This is the heart. A single async function that runs the full two-round procurement workflow, emitting events that the SSE endpoint streams to the UI.
+
+### Core loop logic
 
 ```
-treehacks2026/
-├── .env.example
-├── db/
-│   └── schema.sql
-├── src/
-│   ├── app/
-│   │   ├── page.tsx                              # Placeholder UI
-│   │   └── api/
-│   │       ├── procure/
-│   │       │   ├── start/route.ts                # Intake + extraction
-│   │       │   └── [runId]/
-│   │       │       ├── events/route.ts           # SSE stream
-│   │       │       ├── discover/route.ts         # Perplexity vendor search
-│   │       │       ├── rank/route.ts             # Offer scoring
-│   │       │       ├── purchase/route.ts         # x402 payment
-│   │       │       ├── finalize/route.ts         # Final report
-│   │       │       └── vendor/
-│   │       │           └── [vendorId]/
-│   │       │               ├── scrape/route.ts   # Stagehand extraction
-│   │       │               ├── call/route.ts     # ElevenLabs call
-│   │       │               └── email/route.ts    # Resend email
-│   │       └── webhooks/
-│   │           └── elevenlabs/route.ts           # Post-call webhook
-│   └── lib/
-│       ├── types.ts        # Shared interfaces (incl. OutreachContext)
-│       ├── db.ts           # Vercel Postgres client
-│       ├── openai.ts       # OpenAI helpers (structured output)
-│       ├── perplexity.ts   # Sonar API client
-│       ├── stagehand.ts    # Browserbase client
-│       ├── elevenlabs.ts   # ElevenLabs client
-│       ├── email.ts        # Resend email + context-aware composer
-│       ├── elastic.ts      # Elastic Cloud client
-│       ├── memory.ts       # Memory read/write + retrieval
-│       ├── events.ts       # Event emitter
-│       ├── outreach.ts     # Channel selector + assembleOutreachContext()
-│       ├── scoring.ts      # Offer ranking
-│       ├── idempotency.ts  # Idempotency keys
-│       ├── guardrails.ts   # Safety checks
-│       └── x402.ts         # Coinbase payment
-├── package.json
-└── tsconfig.json
+async function runOrchestrator(runId):
+
+  1. Load run + parsed spec from PG
+
+  -- STAGE: finding_suppliers --
+  2. emit serviceChange {perplexity: true, elasticsearch: true}
+     emit activity (type: "memory", "Checking past deals in memory")
+
+  3. DISCOVERY LOOP (runs Sonar N times with different angles):
+     for each angle in DISCOVERY_ANGLES:
+       - Call discoverVendors(spec, angle)
+       - emit activity (type: "search", title per angle)
+       - Dedupe against existing vendors for this run (by name/phone)
+       - INSERT new vendors into PG
+       - INDEX discovery text into ES
+       - emit activity (type: "search", "Found X new vendors")
+
+     Result: All accumulated vendors in PG with phone numbers
+
+  -- STAGE: calling_for_quote (ROUND 1) --
+  4. emit serviceChange {elevenlabs: true}
+     vendorsWithPhone = SELECT vendors WHERE runId AND phone IS NOT NULL
+
+  5. ROUND 1 CALL LOOP:
+     for each vendor in vendorsWithPhone:
+       - triggerOutboundCall(vendor, runId, spec, round=1)
+       - INSERT call row (round=1, conversationId from response)
+       - emit call_started event
+       - emit calls_change (update active calls list for UI)
+
+  6. WAIT FOR ROUND 1 COMPLETION:
+     Poll loop (every 3s, max 5min timeout):
+       - SELECT calls WHERE runId AND round=1
+       - If all calls have status "completed" or "failed" -> break
+       - (Webhook handler updates call status + creates offers as they arrive)
+
+     After loop: all round 1 offers are in PG
+
+  -- STAGE: negotiating (ROUND 2) --
+  7. emit serviceChange {elevenlabs: true, elasticsearch: true}
+
+  8. NEGOTIATION STRATEGY:
+     - Load all round 1 offers from PG
+     - Find bestOffer (lowest unitPrice)
+     - Find negotiationTargets = vendors whose offer > bestOffer.unitPrice
+     - emit activity (type: "analyze", "Best price: $X from VendorY")
+     - emit activity (type: "analyze", "Will negotiate with Z vendors")
+
+  9. ROUND 2 CALL LOOP:
+     for each vendor in negotiationTargets:
+       negotiationContext = {
+         bestPrice: bestOffer.unitPrice,
+         bestSupplier: bestOffer.vendor.name,  // or "another supplier"
+         targetPrice: bestOffer.unitPrice,
+       }
+       - triggerOutboundCall(vendor, runId, spec, round=2, negotiationContext)
+       - INSERT call row (round=2, conversationId)
+       - emit negotiation_call_started
+       - emit calls_change
+
+  10. WAIT FOR ROUND 2 COMPLETION:
+      Same poll loop as step 6 but for round=2 calls.
+      Webhook handler creates/updates offers with negotiated prices.
+
+  -- STAGE: paying_deposit --
+  11. [MVP: emit mock payment event]
+
+  -- STAGE: complete --
+  12. Aggregate ALL offers (round 1 + round 2) from PG
+      - Rank by unitPrice, then leadTime, then confidence
+      - Build summary object with bestPrice, savings %, recommendation
+      - emit summary event
+      - UPDATE run.status = "complete"
+```
+
+### Webhook handler's role in the loop
+
+The orchestrator does NOT parse transcripts itself. The webhook handler at `/api/webhooks/elevenlabs` does the heavy lifting independently:
+
+1. Receives `post_call_transcription` from ElevenLabs
+2. Looks up the `Call` row by `conversationId`
+3. Stores transcript in `Call.transcript`
+4. Creates placeholder `Offer` row
+5. Indexes transcript into ES for future memory retrieval
+6. Updates `Call.status` to "completed"
+7. Emits SSE events: `quote` (for the quotes panel), `calls_change`
+
+The orchestrator's poll loop in steps 6 and 10 simply waits for the webhook handler to finish setting `Call.status = "completed"` for all calls in that round.
+
+### Key detail: calls_change events for the phone call panel
+
+The UI's `PhoneCallPanel` expects an array of all active + ended calls. Every time a call starts or a webhook arrives, the orchestrator (or webhook handler) emits a `calls_change` event with the **full current array** of calls for the run:
+
+```typescript
+// After any call state change:
+const allCalls = await prisma.call.findMany({
+  where: { runId },
+  include: { vendor: true },
+  orderBy: { createdAt: 'asc' },
+});
+emitRunEvent(runId, {
+  type: 'calls_change',
+  payload: allCalls.map(c => ({
+    id: c.id,
+    active: c.status === 'ringing' || c.status === 'connected',
+    supplier: c.vendor.name,
+    duration: c.duration ?? 0,
+    status: c.status,
+  })),
+});
+```
+
+The orchestrator emits events using the exact same shapes the frontend already expects (activity, quote, call, summary). This means **zero frontend component changes**.
+
+---
+
+## 9. Frontend Changes (Minimal)
+
+Only [`src/app/page.js`](src/app/page.js) changes. Replace the `simulateWorkflow` import and call with:
+
+```javascript
+// Instead of: const cleanup = simulateWorkflow(rfq, callbacks)
+// Do:
+const response = await fetch('/api/run', {
+  method: 'POST',
+  body: JSON.stringify(rfq),
+});
+const { runId } = await response.json();
+
+const eventSource = new EventSource(`/api/run/${runId}/events`);
+eventSource.onmessage = (e) => {
+  const event = JSON.parse(e.data);
+  switch (event.type) {
+    case 'stage_change':    callbacks.onStageChange(event.payload.stage); break;
+    case 'activity':        callbacks.onActivity(event.payload); break;
+    case 'update_activity': callbacks.onUpdateActivity(event.payload.id, event.payload.updates); break;
+    case 'quote':           callbacks.onQuote(event.payload); break;
+    case 'calls_change':    callbacks.onCallsChange(event.payload); break;
+    case 'summary':         callbacks.onSummary(event.payload); break;
+    case 'services_change': callbacks.onServicesChange(event.payload); break;
+  }
+};
+// cleanup = () => eventSource.close()
+```
+
+All existing components (`ActivityFeed`, `PhoneCallPanel`, `QuotesPanel`, `SummaryPanel`, `RequirementsChat`) remain completely untouched.
+
+---
+
+## 10. Environment Variables
+
+```
+DATABASE_URL=postgresql://...
+ELASTIC_URL=https://my-elasticsearch-project-d08f4f.es.us-west1.gcp.elastic.cloud:443
+ELASTIC_API_KEY=OURrVlhwd0IxSG5XakN4QzNhUnA6WkFTd3lsZHdXTmtEY3hEc0dYeXJFQQ==
+PERPLEXITY_API_KEY=pplx-...
+ELEVENLABS_API_KEY=...
+ELEVENLABS_AGENT_ID_QUOTE=...
+ELEVENLABS_AGENT_ID_NEGOTIATE=...
+ELEVENLABS_PHONE_NUMBER_ID=...
 ```
 
 ---
 
-## Verification Plan
+## Potential Issues and Mitigations
 
-Since this is a greenfield hackathon project with many external API integrations, verification is primarily through:
+- **semantic_text slow on first write**: Use `timeout: '5m'` on index calls; model warms up once then stays hot
+- **ElevenLabs webhook disabled after failures**: Always return 200 first, process async. Wrap in try/catch.
+- **Sonar returns non-JSON**: Strip markdown fences, fall back to empty array
+- **SSE disconnects on Vercel/serverless**: Run locally or on Railway/Render for hackathon. Vercel has 30s limit.
+- **Prisma connection exhaustion in dev**: Use standard global singleton pattern in `lib/db.ts`
+- **Webhook arrives before call row inserted**: INSERT call row synchronously before returning from triggerOutboundCall
+- **No phone number for a discovered vendor**: Skip call, emit a "skipped" activity event
 
-### Automated Tests
+---
 
-1. **Type-check & lint** — `npx tsc --noEmit && npx next lint` to confirm all code compiles without errors
-2. **Unit tests for scoring engine** — write a Jest test in `src/lib/__tests__/scoring.test.ts` that feeds mock offers and validates ranking output (command: `npx jest src/lib/__tests__/scoring.test.ts`)
-3. **Unit test for structured extraction** — mock OpenAI response and validate `ProcurementSpec` parsing (command: `npx jest src/lib/__tests__/openai.test.ts`)
+## Implementation Stages
 
-### Manual Verification
+### Stage 1: Foundation (DB, Event Bus, Elastic)
 
-1. **Start endpoint** — run `npm run dev`, then `curl -X POST http://localhost:3000/api/procure/start -H 'Content-Type: application/json' -d '{"query": "Get me $1000 worth of tungsten by Wednesday morning to Stanford campus"}'` — should return a `run_id` and parsed spec
-2. **SSE stream** — open `http://localhost:3000/api/procure/{runId}/events` in browser — should receive real-time event updates
-3. **Discovery** — call the discover endpoint for a run and verify vendor candidates are returned with source URLs
-4. **Full pipeline** — trigger start → discover → scrape → outreach → rank → finalize and verify the final report is generated
+Everything that other stages depend on. No types file, no Zod, no validation -- plain objects everywhere. After this stage you can write to PG, write/query ES, and emit events.
 
-> [!NOTE]
-> All infrastructure is Vercel-hosted. External API integrations (Perplexity, ElevenLabs, Stagehand, Elastic Cloud) require live API keys configured in Vercel environment variables. If keys are unavailable for specific services, those modules will log the intended action and return mock data so the pipeline still completes end-to-end.
+Files created:
+
+- `prisma/schema.prisma` -- Run, Vendor, Offer, Call (with `round`). No Event model.
+- `src/lib/db.ts` -- Prisma singleton
+- `src/lib/events.ts` -- EventEmitter hub
+- `src/lib/elastic.ts` -- ES client + createIndex/writeMemory/retrieveMemory
+- `src/app/api/setup/route.ts` -- one-time index creation + DB check
+
+Test: Run `npx prisma migrate dev`, hit `/api/setup`, confirm index created in Elastic Cloud.
+
+---
+
+### Stage 2: External Service Clients (Sonar, ElevenLabs, Webhook)
+
+Each service client is a standalone file. The webhook handler is here because it is tightly coupled to the ElevenLabs call lifecycle. No HMAC, no auth.
+
+Files created:
+
+- `src/lib/perplexity.ts` -- `discoverVendors(spec, angle)` + `runDiscoveryLoop(spec)`, simple name-based dedupe
+- `src/lib/elevenlabs.ts` -- `triggerOutboundCall(vendor, runId, spec, round, negotiationContext)`
+- `src/app/api/webhooks/elevenlabs/route.ts` -- return 200, parse body, store transcript, placeholder offer, index ES, emit SSE
+
+Test: Call `discoverVendors()` directly. Trigger a real outbound call. Confirm webhook writes to PG + ES.
+
+---
+
+### Stage 3: Orchestrator + API Routes (Wire It All Together)
+
+The orchestrator calls the Stage 2 clients inside the two-round loop. API routes are thin -- no validation, just `req.json()` and go.
+
+Files created:
+
+- `src/lib/orchestrator.ts` -- `runOrchestrator(runId)` with the full pipeline
+- `src/app/api/run/route.ts` -- POST: read body, create run, fire orchestrator
+- `src/app/api/run/[runId]/events/route.ts` -- GET: SSE stream (live only, no replay)
+
+Test: `curl -X POST /api/run` with an RFQ, open `/api/run/{id}/events` in browser to see SSE stream.
+
+---
+
+### Stage 4: Frontend Integration (Connect UI to Real Backend)
+
+Replace the simulated workflow with the real SSE connection. All existing components stay untouched -- only `page.js` changes.
+
+Files modified:
+
+- `src/app/page.js` -- replace `simulateWorkflow` with `fetch('/api/run')` + `EventSource`
+- `.env.local` -- all API keys and connection strings
+
+Test: Full end-to-end. Enter an RFQ in the chat, watch real discovery, real calls, real quotes, real negotiation.

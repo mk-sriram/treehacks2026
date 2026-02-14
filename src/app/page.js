@@ -10,7 +10,7 @@ import { ActivityFeed } from "@/components/activity-feed"
 import { PhoneCallPanel } from "@/components/phone-call-panel"
 import { QuotesPanel } from "@/components/quotes-panel"
 import { SummaryPanel } from "@/components/summary-panel"
-import { simulateWorkflow } from "@/lib/agent-store"
+// import { simulateWorkflow } from "@/lib/agent-store"
 import { cn } from "@/lib/utils"
 import {
   Search,
@@ -77,7 +77,7 @@ export default function ProcurementAgent() {
     }, 600)
   }, [])
 
-  const handleStart = useCallback(() => {
+  const handleStart = useCallback(async () => {
     setActivities([])
     setQuotes([])
     setCalls([])
@@ -86,21 +86,63 @@ export default function ProcurementAgent() {
 
     cleanupRef.current?.()
 
-    const cleanup = simulateWorkflow(rfq, {
-      onStageChange: setStage,
-      onActivity: (activity) =>
-        setActivities((prev) => [...prev, activity]),
-      onUpdateActivity: (id, updates) =>
-        setActivities((prev) =>
-          prev.map((a) => (a.id === id ? { ...a, ...updates } : a))
-        ),
-      onQuote: (quote) => setQuotes((prev) => [...prev, quote]),
-      onCallsChange: setCalls,
-      onSummary: setSummary,
-      onServicesChange: setActiveServices,
-    })
+    try {
+      // Create a real run via the backend
+      const response = await fetch('/api/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(rfq),
+      })
+      const { runId } = await response.json()
 
-    cleanupRef.current = cleanup
+      // Connect to SSE stream
+      const eventSource = new EventSource(`/api/run/${runId}/events`)
+
+      eventSource.onmessage = (e) => {
+        const event = JSON.parse(e.data)
+        switch (event.type) {
+          case 'stage_change':
+            setStage(event.payload.stage)
+            break
+          case 'activity':
+            setActivities((prev) => [...prev, event.payload])
+            break
+          case 'update_activity':
+            setActivities((prev) =>
+              prev.map((a) =>
+                a.id === event.payload.id
+                  ? { ...a, ...event.payload.updates }
+                  : a
+              )
+            )
+            break
+          case 'quote':
+            setQuotes((prev) => [...prev, event.payload])
+            break
+          case 'calls_change':
+            setCalls(event.payload)
+            break
+          case 'summary':
+            setSummary(event.payload)
+            break
+          case 'services_change':
+            setActiveServices(event.payload)
+            break
+        }
+      }
+
+      eventSource.onerror = (err) => {
+        console.error('SSE error:', err)
+        // Don't close immediately -- SSE auto-reconnects
+      }
+
+      cleanupRef.current = () => {
+        eventSource.close()
+      }
+    } catch (err) {
+      console.error('Failed to start run:', err)
+      setStage("idle")
+    }
   }, [rfq])
 
   const hasAutoStarted = useRef(false)

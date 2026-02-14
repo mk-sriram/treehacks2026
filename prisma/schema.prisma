@@ -1,0 +1,61 @@
+datasource db {
+  provider = "postgresql"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Run {
+  id         String   @id @default(cuid())
+  rawQuery   String
+  parsedSpec Json     // {item, quantity, leadTime, quality, location}
+  status     String   @default("pending")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  vendors    Vendor[]
+}
+
+model Vendor {
+  id        String   @id @default(cuid())
+  runId     String
+  run       Run      @relation(fields: [runId], references: [id])
+  name      String
+  url       String?
+  phone     String?
+  email     String?
+  source    String   // "sonar"
+  sourceUrl String?  // citation URL from Sonar
+  metadata  Json?
+  createdAt DateTime @default(now())
+  offers    Offer[]
+  calls     Call[]
+}
+
+model Offer {
+  id           String   @id @default(cuid())
+  vendorId     String
+  vendor       Vendor   @relation(fields: [vendorId], references: [id])
+  unitPrice    Float?
+  moq          String?
+  leadTimeDays Int?
+  shipping     String?
+  terms        String?
+  confidence   Int?
+  source       String   // "voice-call"
+  rawEvidence  String?  // transcript excerpt
+  createdAt    DateTime @default(now())
+}
+
+model Call {
+  id             String   @id @default(cuid())
+  vendorId       String
+  vendor         Vendor   @relation(fields: [vendorId], references: [id])
+  runId          String   // denormalized for quick lookup in webhook
+  round          Int      @default(1) // 1 = initial quote, 2 = negotiation
+  conversationId String?  @unique // ElevenLabs conversation_id
+  transcript     String?
+  status         String   @default("pending")
+  duration       Int?
+  createdAt      DateTime @default(now())
+}

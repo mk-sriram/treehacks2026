@@ -79,7 +79,8 @@ function StatusIndicator({ status }) {
 }
 
 function formatTime(date) {
-  return date.toLocaleTimeString("en-US", {
+  const d = date instanceof Date ? date : new Date(date)
+  return d.toLocaleTimeString("en-US", {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
