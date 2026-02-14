@@ -7,11 +7,18 @@ const client = new Client({
 
 const INDEX_NAME = 'proc_memory';
 
+console.log('[ES] Elasticsearch client initialized. ELASTIC_URL present:', !!process.env.ELASTIC_URL, '| ELASTIC_SECRET present:', !!process.env.ELASTIC_SECRET);
+
 // Called once via /api/setup
 export async function createIndex() {
+  console.log('[ES] createIndex() called — checking if index exists...');
   const exists = await client.indices.exists({ index: INDEX_NAME });
-  if (exists) return { created: false, message: 'Index already exists' };
+  if (exists) {
+    console.log('[ES] Index already exists, skipping creation');
+    return { created: false, message: 'Index already exists' };
+  }
 
+  console.log('[ES] Creating index with semantic_text mapping...');
   await client.indices.create({
     index: INDEX_NAME,
     mappings: {
@@ -25,6 +32,7 @@ export async function createIndex() {
     },
   });
 
+  console.log('[ES] Index created successfully');
   return { created: true, message: 'Index created' };
 }
 
@@ -36,6 +44,7 @@ export async function writeMemory(doc: {
   channel: string;
   created_at?: string;
 }) {
+  console.log(`[ES] writeMemory() called — run_id=${doc.run_id}, channel=${doc.channel}, text length=${doc.text.length}`);
   await client.index({
     index: INDEX_NAME,
     document: {
@@ -44,6 +53,7 @@ export async function writeMemory(doc: {
     },
     timeout: '5m', // semantic_text may need model warmup on first call
   });
+  console.log(`[ES] writeMemory() complete — run_id=${doc.run_id}`);
 }
 
 // Retrieve relevant memories
@@ -51,6 +61,7 @@ export async function retrieveMemory(
   query: string,
   filters: { vendor_id?: string; run_id?: string } = {}
 ) {
+  console.log(`[ES] retrieveMemory() called — query="${query.slice(0, 80)}...", filters=`, filters);
   const must: any[] = [];
   if (filters.vendor_id) must.push({ term: { vendor_id: filters.vendor_id } });
   if (filters.run_id)    must.push({ term: { run_id: filters.run_id } });

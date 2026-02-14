@@ -67,6 +67,11 @@ export async function discoverVendors(
     .filter(Boolean)
     .join('. ');
 
+  console.log(`[PERPLEXITY] discoverVendors() called — angle="${angle.slice(0, 50)}..."`);
+  console.log(`[PERPLEXITY] User message: "${userMessage.slice(0, 120)}..."`);
+  console.log(`[PERPLEXITY] API key present:`, !!process.env.PERPLEXITY_API_KEY);
+  console.log(`[PERPLEXITY] API key prefix:`, process.env.PERPLEXITY_API_KEY?.slice(0, 8) + '...');
+
   const res = await fetch('https://api.perplexity.ai/chat/completions', {
     method: 'POST',
     headers: {
@@ -82,15 +87,20 @@ export async function discoverVendors(
     }),
   });
 
+  console.log(`[PERPLEXITY] Response status: ${res.status} ${res.statusText}`);
+
   if (!res.ok) {
     const errText = await res.text();
-    console.error('Perplexity API error:', res.status, errText);
+    console.error('[PERPLEXITY] API error:', res.status, errText.slice(0, 300));
     return { vendors: [], citations: [], rawContent: errText };
   }
 
   const data = await res.json();
   const rawContent = data.choices?.[0]?.message?.content ?? '';
   const citations: string[] = data.citations ?? [];
+
+  console.log(`[PERPLEXITY] Response received — content length=${rawContent.length}, citations=${citations.length}`);
+  console.log(`[PERPLEXITY] Raw content preview: "${rawContent.slice(0, 200)}..."`);
 
   // Best-effort parse -- content might be JSON or text with JSON in it
   let vendors: VendorCandidate[] = [];
@@ -102,17 +112,23 @@ export async function discoverVendors(
       .trim();
     const parsed = JSON.parse(cleaned);
     vendors = Array.isArray(parsed) ? parsed : [];
+    console.log(`[PERPLEXITY] Parsed ${vendors.length} vendors from JSON`);
   } catch {
     // Try to extract JSON array from the content
     try {
       const match = rawContent.match(/\[[\s\S]*\]/);
       if (match) {
         vendors = JSON.parse(match[0]);
+        console.log(`[PERPLEXITY] Parsed ${vendors.length} vendors from extracted JSON array`);
       }
     } catch {
-      console.error('Failed to parse Perplexity response as JSON:', rawContent.slice(0, 200));
+      console.error('[PERPLEXITY] Failed to parse response as JSON:', rawContent.slice(0, 200));
       vendors = [];
     }
+  }
+
+  if (vendors.length > 0) {
+    console.log(`[PERPLEXITY] Vendor names:`, vendors.map(v => v.name).join(', '));
   }
 
   return { vendors, citations, rawContent };
@@ -122,16 +138,22 @@ export async function runDiscoveryLoop(
   spec: { item: string; quantity: string; leadTime?: string; quality?: string; location?: string },
   onProgress?: (angle: string, vendors: VendorCandidate[], citations: string[]) => void
 ): Promise<VendorCandidate[]> {
+  console.log(`[PERPLEXITY] runDiscoveryLoop() started — item="${spec.item}", quantity="${spec.quantity}"`);
+  console.log(`[PERPLEXITY] Will run ${DISCOVERY_ANGLES.length} search angles`);
   const allVendors: VendorCandidate[] = [];
 
-  for (const angle of DISCOVERY_ANGLES) {
+  for (let i = 0; i < DISCOVERY_ANGLES.length; i++) {
+    const angle = DISCOVERY_ANGLES[i];
+    console.log(`[PERPLEXITY] --- Angle ${i + 1}/${DISCOVERY_ANGLES.length}: "${angle.slice(0, 60)}..." ---`);
     const { vendors, citations } = await discoverVendors(spec, angle);
 
     // Attach source URLs from citations
-    const vendorsWithSources = vendors.map((v, i) => ({
+    const vendorsWithSources = vendors.map((v, j) => ({
       ...v,
-      sourceUrl: citations[i] ?? null,
+      sourceUrl: citations[j] ?? null,
     }));
+
+    console.log(`[PERPLEXITY] Angle ${i + 1} result: ${vendorsWithSources.length} vendors, ${citations.length} citations`);
 
     // Notify caller of progress (for SSE events)
     onProgress?.(angle, vendorsWithSources, citations);
@@ -141,10 +163,13 @@ export async function runDiscoveryLoop(
 
   // Simple dedupe by name (case-insensitive)
   const seen = new Set<string>();
-  return allVendors.filter((v) => {
+  const deduped = allVendors.filter((v) => {
     const key = v.name?.toLowerCase().trim();
     if (!key || seen.has(key)) return false;
     seen.add(key);
     return true;
   });
+
+  console.log(`[PERPLEXITY] runDiscoveryLoop() complete — ${allVendors.length} total -> ${deduped.length} after dedup`);
+  return deduped;
 }

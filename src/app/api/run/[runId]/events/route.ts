@@ -8,6 +8,7 @@ export async function GET(
   { params }: { params: Promise<{ runId: string }> }
 ) {
   const { runId } = await params;
+  console.log(`[API /api/run/${runId}/events] SSE connection opened`);
 
   const encoder = new TextEncoder();
 
@@ -20,12 +21,14 @@ export async function GET(
         try {
           const data = `data: ${JSON.stringify(event)}\n\n`;
           controller.enqueue(encoder.encode(data));
+          console.log(`[API SSE] Sent event to client: type=${event.type}`);
         } catch {
           // Stream may be closed
         }
       };
 
       eventBus.on(`run:${runId}`, handler);
+      console.log(`[API SSE] Subscribed to eventBus for run:${runId}`);
 
       // Keepalive every 15s to prevent timeouts
       const keepalive = setInterval(() => {
@@ -38,6 +41,7 @@ export async function GET(
 
       // Cleanup on disconnect
       req.signal.addEventListener('abort', () => {
+        console.log(`[API SSE] Client disconnected for run:${runId}`);
         eventBus.off(`run:${runId}`, handler);
         clearInterval(keepalive);
         try {

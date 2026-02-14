@@ -15,8 +15,12 @@ function makeActivityId() {
 }
 
 export async function runOrchestrator(runId: string) {
+  console.log(`\n[ORCHESTRATOR] ========================================`);
+  console.log(`[ORCHESTRATOR] Starting orchestrator for runId=${runId}`);
+  console.log(`[ORCHESTRATOR] ========================================\n`);
   try {
     // 1. Load run
+    console.log(`[ORCHESTRATOR] Loading run from Postgres...`);
     const run = await prisma.run.findUniqueOrThrow({ where: { id: runId } });
     const spec = run.parsedSpec as {
       item: string;
@@ -25,11 +29,14 @@ export async function runOrchestrator(runId: string) {
       quality?: string;
       location?: string;
     };
+    console.log(`[ORCHESTRATOR] Run loaded — spec:`, JSON.stringify(spec));
 
     // Update run status
     await prisma.run.update({ where: { id: runId }, data: { status: 'running' } });
+    console.log(`[ORCHESTRATOR] Run status updated to 'running'`);
 
     // ===== STAGE: finding_suppliers =====
+    console.log(`[ORCHESTRATOR] === STAGE: finding_suppliers ===`);
     emitRunEvent(runId, { type: 'stage_change', payload: { stage: 'finding_suppliers' } });
     emitRunEvent(runId, {
       type: 'services_change',
@@ -53,13 +60,16 @@ export async function runOrchestrator(runId: string) {
     });
 
     // Simulate a brief memory check (TODO: real retrieval once ES has data)
+    console.log(`[ORCHESTRATOR] Running memory check...`);
     await sleep(500);
     emitRunEvent(runId, {
       type: 'update_activity',
       payload: { id: memoryActivityId, updates: { status: 'done', description: 'Memory check complete. No past deals found for this item yet.' } },
     });
+    console.log(`[ORCHESTRATOR] Memory check complete`);
 
     // Run Perplexity discovery loop with progress callbacks
+    console.log(`[ORCHESTRATOR] Starting Perplexity discovery loop...`);
     let totalVendorsFound = 0;
     const angleLabels = [
       'Searching for top manufacturers and wholesale suppliers',
@@ -89,7 +99,10 @@ export async function runOrchestrator(runId: string) {
       totalVendorsFound += vendors.length;
     });
 
+    console.log(`[ORCHESTRATOR] Discovery loop complete — ${deduped.length} unique vendors (${totalVendorsFound} total before dedup)`);
+
     // Store deduped vendors in PG
+    console.log(`[ORCHESTRATOR] Storing ${deduped.length} vendors in Postgres...`);
     const createdVendors = [];
     for (const v of deduped) {
       const vendor = await prisma.vendor.create({
@@ -113,9 +126,12 @@ export async function runOrchestrator(runId: string) {
         },
       });
       createdVendors.push(vendor);
+      console.log(`[ORCHESTRATOR] Stored vendor: ${vendor.name} (id=${vendor.id}, phone=${vendor.phone ?? 'none'}, email=${vendor.email ?? 'none'})`);
     }
+    console.log(`[ORCHESTRATOR] All ${createdVendors.length} vendors stored in Postgres`);
 
     // Index discovery results into ES
+    console.log(`[ORCHESTRATOR] Indexing discovery results into Elasticsearch...`);
     try {
       const discoveryText = deduped
         .map(
@@ -129,8 +145,9 @@ export async function runOrchestrator(runId: string) {
         run_id: runId,
         channel: 'search',
       });
+      console.log(`[ORCHESTRATOR] Discovery results indexed in ES (text length=${discoveryText.length})`);
     } catch (err) {
-      console.error('Failed to write discovery to ES (non-fatal):', err);
+      console.error('[ORCHESTRATOR] Failed to write discovery to ES (non-fatal):', err);
     }
 
     // Emit summary activity for discovery
@@ -149,6 +166,7 @@ export async function runOrchestrator(runId: string) {
     });
 
     // Emit quotes from Perplexity pricing data (as preliminary web-sourced quotes)
+    console.log(`[ORCHESTRATOR] Emitting quotes for vendors with pricing data...`);
     for (const v of deduped) {
       if (v.pricing && v.pricing !== 'N/A') {
         emitRunEvent(runId, {
@@ -167,7 +185,10 @@ export async function runOrchestrator(runId: string) {
       }
     }
 
+    console.log(`[ORCHESTRATOR] Quotes emitted for ${deduped.filter(v => v.pricing && v.pricing !== 'N/A').length} vendors`);
+
     // Mark discovery stage complete
+    console.log(`[ORCHESTRATOR] === STAGE: complete ===`);
     emitRunEvent(runId, {
       type: 'services_change',
       payload: { perplexity: false, elasticsearch: false, openai: false, stagehand: false, elevenlabs: false, visa: false },
@@ -212,8 +233,11 @@ export async function runOrchestrator(runId: string) {
     });
 
     await prisma.run.update({ where: { id: runId }, data: { status: 'complete' } });
+    console.log(`[ORCHESTRATOR] ========================================`);
+    console.log(`[ORCHESTRATOR] Run ${runId} COMPLETED SUCCESSFULLY`);
+    console.log(`[ORCHESTRATOR] ========================================\n`);
   } catch (err) {
-    console.error('Orchestrator error:', err);
+    console.error('[ORCHESTRATOR] FATAL ERROR:', err);
 
     // Emit error event
     emitRunEvent(runId, {

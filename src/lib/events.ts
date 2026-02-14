@@ -9,5 +9,6 @@ export const eventBus: EventEmitter =
 eventBus.setMaxListeners(100);
 
 export function emitRunEvent(runId: string, event: Record<string, any>) {
+  console.log(`[SSE] Emitting event for run:${runId} ->`, event.type, event.type === 'activity' ? event.payload?.title : event.type === 'stage_change' ? event.payload?.stage : '');
   eventBus.emit(`run:${runId}`, event);
 }
