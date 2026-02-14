@@ -25,13 +25,11 @@ How they match the item and quality constraints
 Indicative pricing for the requested quantity (or best available pricing info)
 Shipping / lead time information, especially whether they can meet the delivery deadline
 Notes (e.g., certifications, notable customers, risks, or limitations)
-Phone Number
+Preferred Contact Method ("Phone", "Email", or "Browser Form")
+Phone
 Email
+Browser Form URL
 
-After the table, provide:
-A brief analysis of which 3–5 vendors look like the best fit given the budget, deadline, location, quantity, and quality constraints.
-Call out any risks or uncertainties (e.g., unclear shipping times, no visible pricing, ambiguous quality claims).
-If no vendor can fully satisfy all constraints, propose the closest feasible options and explain which constraints might need to be relaxed (and by how much).
-If any detail I provided is ambiguous (for example, quantity units or quality grades), make a reasonable assumption, state it explicitly, and proceed with the research.
+The Vendor Name, Website, and Preferred Contact Method are most important, and must be accurate. If phone is their preferred method of contact, indicate that and ensure the phone number is found and filled in. Vice Versa for Email. If there is a form or some other contact method on the webpage itself, place the url from which you can contact the vendor.
 
 
