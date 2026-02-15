@@ -47,33 +47,8 @@ export async function runOrchestrator(runId: string) {
         emitRunEvent(runId, { type: 'stage_change', payload: { stage: 'finding_suppliers' } });
         emitRunEvent(runId, {
             type: 'services_change',
-            payload: { perplexity: true, elasticsearch: true, openai: false, stagehand: false, elevenlabs: false, visa: false },
+            payload: { perplexity: true, elasticsearch: false, openai: false, stagehand: false, elevenlabs: false, visa: false },
         });
-
-        // Memory check activity
-        const memoryActivityId = makeActivityId();
-        emitRunEvent(runId, {
-            type: 'activity',
-            payload: {
-                id: memoryActivityId,
-                type: 'memory',
-                title: 'Elasticsearch: Checking past deals',
-                description: 'Searching memory for past negotiations and pricing history for similar items',
-                timestamp: new Date(),
-                status: 'running',
-                tool: 'elasticsearch',
-                parallelGroup: 'search-parallel-1',
-            },
-        });
-
-        // Simulate a brief memory check (TODO: real retrieval once ES has data)
-        console.log(`[ORCHESTRATOR] Running memory check...`);
-        await sleep(500);
-        emitRunEvent(runId, {
-            type: 'update_activity',
-            payload: { id: memoryActivityId, updates: { status: 'done', description: 'Memory check complete. No past deals found for this item yet.' } },
-        });
-        console.log(`[ORCHESTRATOR] Memory check complete`);
 
         // Run Perplexity discovery loop with progress callbacks
         console.log(`[ORCHESTRATOR] Starting Perplexity discovery loop...`);
