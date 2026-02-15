@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState, useRef } from "react"
+import { useEffect, useState, useRef, useMemo } from "react"
 import { cn } from "@/lib/utils"
 import { Phone, PhoneOff, Mic, Database, CheckCircle2, Loader2 } from "lucide-react"
 
@@ -225,7 +225,7 @@ function SingleCallRow({ call }) {
       {isConnected && !hasSubActions && (
         <div className="mt-2 flex items-center gap-2 text-[9px] text-muted-foreground/40 font-mono">
           <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
-          ElevenLabs STT &middot; Decagon AOP
+          ElevenLabs STT &middot; Voice Agent
         </div>
       )}
     </div>
@@ -233,10 +233,47 @@ function SingleCallRow({ call }) {
 }
 
 export function PhoneCallPanel({ calls }) {
+  const [manualExpand, setManualExpand] = useState(null) // null = auto, true/false = manual
+  const prevActiveCountRef = useRef(0)
+
+  const activeCalls = useMemo(() => calls.filter((c) => c.status !== "ended"), [calls])
+  const endedCalls = useMemo(() => calls.filter((c) => c.status === "ended"), [calls])
+  const allEnded = activeCalls.length === 0 && endedCalls.length > 0
+
+  // Auto-expand when new active calls appear (e.g. round 2 starts)
+  useEffect(() => {
+    if (activeCalls.length > 0 && prevActiveCountRef.current === 0) {
+      setManualExpand(null) // revert to auto behavior → expands
+    }
+    prevActiveCountRef.current = activeCalls.length
+  }, [activeCalls.length])
+
   if (calls.length === 0) return null
 
-  const activeCalls = calls.filter((c) => c.status !== "ended")
-  const endedCalls = calls.filter((c) => c.status === "ended")
+  // Auto-collapse when all calls end, auto-expand when calls are active
+  const isExpanded = manualExpand !== null ? manualExpand : !allEnded
+
+  // Collapsed: compact single-line summary
+  if (!isExpanded) {
+    return (
+      <button
+        onClick={() => setManualExpand(true)}
+        className="w-full rounded-lg border border-border/50 bg-card px-4 py-2.5 flex items-center justify-between hover:bg-muted/30 transition-colors group"
+      >
+        <div className="flex items-center gap-2">
+          <div className="flex items-center justify-center w-5 h-5 rounded-full bg-muted text-muted-foreground/40">
+            <PhoneOff className="h-3 w-3" />
+          </div>
+          <span className="text-xs text-muted-foreground">
+            {calls.length} call{calls.length !== 1 ? "s" : ""} completed
+          </span>
+        </div>
+        <span className="text-[10px] text-muted-foreground/40 group-hover:text-muted-foreground transition-colors">
+          Show
+        </span>
+      </button>
+    )
+  }
 
   return (
     <div className="rounded-lg border border-border/50 bg-card p-4">
@@ -256,6 +293,12 @@ export function PhoneCallPanel({ calls }) {
               {endedCalls.length} completed
             </span>
           )}
+          <button
+            onClick={() => setManualExpand(false)}
+            className="text-[10px] text-muted-foreground/40 hover:text-muted-foreground transition-colors ml-1"
+          >
+            Minimize
+          </button>
         </div>
       </div>
       <div className="flex flex-col gap-2">

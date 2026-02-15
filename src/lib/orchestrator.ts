@@ -8,7 +8,7 @@
 // Round 2 negotiation is triggered separately after round 1 results are reviewed.
 
 import { prisma } from './db';
-import { emitRunEvent } from './events';
+import { emitRunEvent, activateService, deactivateService, resetServices } from './events';
 import { runDiscoveryLoop, type VendorCandidate } from './perplexity';
 import { writeMemory } from './elastic';
 import { triggerOutboundCall, buildDynamicVariables, resolveDialNumber, getTestPhoneNumbers } from './elevenlabs';
@@ -45,10 +45,7 @@ export async function runOrchestrator(runId: string) {
         // ===== STAGE: finding_suppliers =====
         console.log(`[ORCHESTRATOR] === STAGE: finding_suppliers ===`);
         emitRunEvent(runId, { type: 'stage_change', payload: { stage: 'finding_suppliers' } });
-        emitRunEvent(runId, {
-            type: 'services_change',
-            payload: { perplexity: true, elasticsearch: false, openai: false, stagehand: false, elevenlabs: false, visa: false },
-        });
+        activateService(runId, 'perplexity');
 
         // Run Perplexity discovery loop with progress callbacks
         console.log(`[ORCHESTRATOR] Starting Perplexity discovery loop...`);
@@ -81,6 +78,7 @@ export async function runOrchestrator(runId: string) {
             totalVendorsFound += vendors.length;
         });
 
+        deactivateService(runId, 'perplexity');
         console.log(`[ORCHESTRATOR] Discovery loop complete — ${deduped.length} unique vendors (${totalVendorsFound} total before dedup)`);
 
         // ===== LIMIT TO TOP 3 VENDORS =====
@@ -123,6 +121,7 @@ export async function runOrchestrator(runId: string) {
         console.log(`[ORCHESTRATOR] All ${createdVendors.length} vendors stored in Postgres`);
 
         // Index discovery results into ES — one document per vendor
+        activateService(runId, 'elasticsearch');
         console.log(`[ORCHESTRATOR] Indexing per-vendor discovery results into Elasticsearch...`);
         const esWriteResults = await Promise.allSettled(
             createdVendors.map((vendor, idx) => {
@@ -161,6 +160,8 @@ export async function runOrchestrator(runId: string) {
                 }
             });
         }
+
+        deactivateService(runId, 'elasticsearch');
 
         // ===== ASSIGN TEST PHONE NUMBERS (if override is set) =====
         // When ELEVENLABS_TEST_PHONE_OVERRIDE is set (CSV of phone numbers),
@@ -216,10 +217,7 @@ export async function runOrchestrator(runId: string) {
         // Transition to calling stage — only vendors with phone numbers can be called
         console.log(`[ORCHESTRATOR] === STAGE: calling_for_quote ===`);
         emitRunEvent(runId, { type: 'stage_change', payload: { stage: 'calling_for_quote' } });
-        emitRunEvent(runId, {
-            type: 'services_change',
-            payload: { perplexity: false, elasticsearch: true, openai: false, stagehand: false, elevenlabs: true, visa: false },
-        });
+        // Services will be activated granularly per-call below
 
         if (vendorsWithPhone.length === 0) {
             // No vendors with phone numbers — can't make calls
@@ -309,8 +307,10 @@ export async function runOrchestrator(runId: string) {
                     });
 
                     try {
+                        activateService(runId, 'elasticsearch');
                         console.log(`[ORCHESTRATOR] Assembling outreach context for ${vendor.name}...`);
                         const ctx = await assembleOutreachContext(runId, vendor.id);
+                        deactivateService(runId, 'elasticsearch');
 
                         const { dialNumber, isOverridden } = resolveDialNumber(vendor.phone!, vendor.id);
                         if (isOverridden) {
@@ -319,6 +319,7 @@ export async function runOrchestrator(runId: string) {
 
                         const dynamicVariables = buildDynamicVariables(ctx, runId, vendor.id, 1);
 
+                        activateService(runId, 'elevenlabs');
                         console.log(`[ORCHESTRATOR] Triggering call to ${vendor.name} at ${dialNumber}...`);
                         const callResponse = await triggerOutboundCall({
                             agentId: agentIdQuote!,
@@ -339,6 +340,7 @@ export async function runOrchestrator(runId: string) {
 
                         if (!callResponse.conversation_id) {
                             console.warn(`[ORCHESTRATOR] conversation_id is null for ${vendor.name} — call marked as failed`);
+                            deactivateService(runId, 'elevenlabs');
                         }
 
                         callResults.push({
@@ -378,6 +380,10 @@ export async function runOrchestrator(runId: string) {
                         });
                     } catch (err) {
                         console.error(`[ORCHESTRATOR] Failed to call ${vendor.name}:`, err);
+
+                        // Clean up any activated services
+                        deactivateService(runId, 'elasticsearch');
+                        deactivateService(runId, 'elevenlabs');
 
                         // Mark placeholder as failed
                         await prisma.call.update({
@@ -453,6 +459,7 @@ export async function runOrchestrator(runId: string) {
             },
         });
 
+        resetServices(runId);
         emitRunEvent(runId, { type: 'stage_change', payload: { stage: 'complete' } });
         await prisma.run.update({ where: { id: runId }, data: { status: 'failed' } }).catch(() => { });
     }

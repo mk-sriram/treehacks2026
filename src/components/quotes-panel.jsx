@@ -26,8 +26,10 @@ export function QuotesPanel({ quotes }) {
   if (quotes.length === 0) return null
 
   const bestQuote = quotes.reduce((min, q) => {
-    const minVal = parseFloat(min.unitPrice.replace(/[^0-9.]/g, ""))
-    const qVal = parseFloat(q.unitPrice.replace(/[^0-9.]/g, ""))
+    const minVal = parseFloat((min.unitPrice ?? "").replace(/[^0-9.]/g, ""))
+    const qVal = parseFloat((q.unitPrice ?? "").replace(/[^0-9.]/g, ""))
+    if (isNaN(qVal)) return min   // q has no valid price, keep min
+    if (isNaN(minVal)) return q   // min has no valid price, q is better
     return qVal < minVal ? q : min
   }, quotes[0])
 

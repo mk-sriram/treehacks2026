@@ -7,7 +7,7 @@ import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
 import { prisma } from '@/lib/db';
 import { writeMemory } from '@/lib/elastic';
-import { emitRunEvent } from '@/lib/events';
+import { emitRunEvent, activateService, deactivateService, resetServices } from '@/lib/events';
 import { triggerOutboundCall, buildDynamicVariables, resolveDialNumber } from '@/lib/elevenlabs';
 import { assembleOutreachContext } from '@/lib/outreach';
 import { generateNegotiationStrategy, retrieveVendorIntelligence, formatStrategyForAgent, type NegotiationStrategyInput } from '@/lib/negotiation';
@@ -165,60 +165,73 @@ async function processPostCallTranscription(body: any) {
     });
     console.log(`[WEBHOOK] Call row updated — status=completed, duration=${callDurationSecs ?? 'unknown'}s`);
 
+    // Call completed → deactivate this call's elevenlabs reference
+    deactivateService(call.runId, 'elevenlabs');
+
     // Emit full calls_change array so frontend PhoneCallPanel updates IMMEDIATELY
     await emitCallsChange(call.runId);
 
     // 3. Extract structured offer terms from the transcript via LLM
+    //    Skip extraction for round 3 (confirmation call) — it's not about getting quotes,
+    //    it's just confirming the deal and telling the vendor we'll send an email.
     let extractedOffer = null;
-    try {
-        extractedOffer = await extractOfferViaLLM(transcriptText, call.vendor.name, analysis);
+    if (call.round <= 2) {
+        try {
+            activateService(call.runId, 'openai');
+            extractedOffer = await extractOfferViaLLM(transcriptText, call.vendor.name, analysis);
+            deactivateService(call.runId, 'openai');
 
-        if (extractedOffer) {
-            const offer = await prisma.offer.create({
-                data: {
-                    vendorId: call.vendorId,
-                    unitPrice: extractedOffer.unitPrice,
-                    moq: extractedOffer.moq,
-                    leadTimeDays: extractedOffer.leadTimeDays,
-                    shipping: extractedOffer.shipping,
-                    terms: extractedOffer.terms,
-                    confidence: extractedOffer.confidence,
-                    source: call.round === 1 ? 'voice-call-r1' : 'voice-call-r2',
-                    rawEvidence: transcriptText.slice(0, 2000),
-                },
-            });
-            console.log(`[WEBHOOK] Offer created — id=${offer.id}, unitPrice=${offer.unitPrice}, leadTime=${offer.leadTimeDays}d, confidence=${offer.confidence}`);
+            if (extractedOffer) {
+                const offer = await prisma.offer.create({
+                    data: {
+                        vendorId: call.vendorId,
+                        unitPrice: extractedOffer.unitPrice,
+                        moq: extractedOffer.moq,
+                        leadTimeDays: extractedOffer.leadTimeDays,
+                        shipping: extractedOffer.shipping,
+                        terms: extractedOffer.terms,
+                        confidence: extractedOffer.confidence,
+                        source: call.round === 1 ? 'voice-call-r1' : 'voice-call-r2',
+                        rawEvidence: transcriptText.slice(0, 2000),
+                    },
+                });
+                console.log(`[WEBHOOK] Offer created — id=${offer.id}, unitPrice=${offer.unitPrice}, leadTime=${offer.leadTimeDays}d, confidence=${offer.confidence}`);
 
-            // Emit quote event for the frontend
-            emitRunEvent(call.runId, {
-                type: 'quote',
-                payload: {
-                    supplier: call.vendor.name,
-                    unitPrice: extractedOffer.unitPrice != null ? `$${extractedOffer.unitPrice}` : 'Not quoted',
-                    moq: extractedOffer.moq ?? 'N/A',
-                    leadTime: extractedOffer.leadTimeDays != null ? `${extractedOffer.leadTimeDays} days` : 'N/A',
-                    shipping: extractedOffer.shipping ?? 'N/A',
-                    terms: extractedOffer.terms ?? 'N/A',
-                    confidence: extractedOffer.confidence ?? 50,
-                    source: call.round === 1 ? 'voice-call' : 'negotiation-call',
-                    transcriptSummary: analysis?.transcript_summary ?? null,
-                },
-            });
+                // Emit quote event for the frontend
+                emitRunEvent(call.runId, {
+                    type: 'quote',
+                    payload: {
+                        supplier: call.vendor.name,
+                        unitPrice: extractedOffer.unitPrice != null ? `$${extractedOffer.unitPrice}` : 'Not quoted',
+                        moq: extractedOffer.moq ?? 'N/A',
+                        leadTime: extractedOffer.leadTimeDays != null ? `${extractedOffer.leadTimeDays} days` : 'N/A',
+                        shipping: extractedOffer.shipping ?? 'N/A',
+                        terms: extractedOffer.terms ?? 'N/A',
+                        confidence: extractedOffer.confidence ?? 50,
+                        source: call.round === 1 ? 'voice-call-r1' : 'voice-call-r2',
+                        transcriptSummary: analysis?.transcript_summary ?? null,
+                    },
+                });
+            }
+        } catch (err) {
+            deactivateService(call.runId, 'openai');
+            console.error(`[WEBHOOK] Offer extraction failed for ${call.vendor.name}:`, err);
+            // Continue execution - do not return
         }
-    } catch (err) {
-        console.error(`[WEBHOOK] Offer extraction failed for ${call.vendor.name}:`, err);
-        // Continue execution - do not return
+    } else {
+        console.log(`[WEBHOOK] Skipping offer extraction for round ${call.round} confirmation call`);
     }
 
     // 4. Write transcript + extracted facts to Elasticsearch (memory)
     try {
+        activateService(call.runId, 'elasticsearch');
         const memoryText = [
             `Voice call with ${call.vendor.name} (round ${call.round}).`,
             analysis.transcript_summary ? `Summary: ${analysis.transcript_summary}` : '',
             extractedOffer?.unitPrice != null ? `Quoted $${extractedOffer.unitPrice}/unit.` : '',
             extractedOffer?.leadTimeDays != null ? `Lead time: ${extractedOffer.leadTimeDays} days.` : '',
             extractedOffer?.terms ? `Terms: ${extractedOffer.terms}.` : '',
-            `Full transcript: ${transcriptText.slice(0, 800)}`,
+            `Full transcript: ${transcriptText.slice(0, 2000)}`,
         ].filter(Boolean).join(' ');
 
         await writeMemory({
@@ -227,22 +240,29 @@ async function processPostCallTranscription(body: any) {
             vendor_id: call.vendorId,
             channel: 'call',
         });
+        deactivateService(call.runId, 'elasticsearch');
         console.log(`[WEBHOOK] Transcript indexed in Elasticsearch`);
     } catch (err) {
+        deactivateService(call.runId, 'elasticsearch');
         console.error('[WEBHOOK] Failed to write to ES (non-fatal):', err);
     }
 
     // 5. Emit SSE events for the frontend
     const activityId = makeActivityId();
+    const isConfirmationCall = call.round === 3;
     emitRunEvent(call.runId, {
         type: 'activity',
         payload: {
             id: activityId,
             type: 'call',
-            title: `Call completed: ${call.vendor.name}`,
-            description: extractedOffer
-                ? `Quote received: ${extractedOffer.unitPrice != null ? `$${extractedOffer.unitPrice}/unit` : 'pricing discussed'}, ${extractedOffer.leadTimeDays ? `${extractedOffer.leadTimeDays} day lead time` : 'lead time TBD'}. Confidence: ${extractedOffer.confidence}%.`
-                : `Call completed but no deal extracted. Transcript stored.`,
+            title: isConfirmationCall
+                ? `Confirmation call completed: ${call.vendor.name}`
+                : `Call completed: ${call.vendor.name}`,
+            description: isConfirmationCall
+                ? `Confirmed with ${call.vendor.name} that they've been selected. Informed them a confirmation email with price summary will follow.`
+                : extractedOffer
+                    ? `Quote received: ${extractedOffer.unitPrice != null ? `$${extractedOffer.unitPrice}/unit` : 'pricing discussed'}, ${extractedOffer.leadTimeDays ? `${extractedOffer.leadTimeDays} day lead time` : 'lead time TBD'}. Confidence: ${extractedOffer.confidence}%.`
+                    : `Call completed but no deal extracted. Transcript stored.`,
             timestamp: new Date(),
             status: 'done',
             tool: 'elevenlabs',
@@ -296,6 +316,9 @@ async function processCallInitiationFailure(body: any) {
         where: { id: call.id },
         data: { status: 'failed' },
     });
+
+    // Call failed → deactivate this call's elevenlabs reference
+    deactivateService(call.runId, 'elevenlabs');
 
     emitRunEvent(call.runId, {
         type: 'activity',
@@ -444,12 +467,24 @@ function parseElevenLabsAnalysis(analysis: any): ExtractedOffer | null {
 
 // ─── Pipeline continuation ──────────────────────────────────────────
 
+// Track active watchdog timers so we don't schedule duplicates
+const activeWatchdogs: Map<string, NodeJS.Timeout> = new Map();
+
+// Track which calls have already been retried (callId → true)
+const retriedCalls: Set<string> = new Set();
+
+/** How long (ms) to wait before a call with no webhook is considered stale */
+const STALE_CALL_TIMEOUT_MS = 50 * 1000; // 50 seconds
+
 /**
  * After each call completes (transcript or failure), check if ALL calls
  * for the round are done. If so, advance the pipeline.
  *
  * Uses compare-and-swap (CAS) on Run.status to prevent duplicate transitions
  * when multiple webhooks arrive at the same time.
+ *
+ * If calls are still pending, schedules a watchdog timer that will
+ * either retry or force-fail stale calls after STALE_CALL_TIMEOUT_MS.
  */
 async function checkRoundCompletion(runId: string, round: number) {
     // Count calls that are NOT in a terminal state.
@@ -460,13 +495,35 @@ async function checkRoundCompletion(runId: string, round: number) {
 
     if (pendingCalls > 0) {
         console.log(`[WEBHOOK] ${pendingCalls} calls still pending for round ${round} — not advancing yet`);
+
+        // Schedule a watchdog to handle stale calls if webhook never arrives
+        const watchdogKey = `${runId}:${round}`;
+        if (!activeWatchdogs.has(watchdogKey)) {
+            console.log(`[WEBHOOK] Scheduling stale-call watchdog for round ${round} (${STALE_CALL_TIMEOUT_MS / 1000}s timeout)`);
+            const timer = setTimeout(() => {
+                activeWatchdogs.delete(watchdogKey);
+                handleStaleCalls(runId, round).catch(err =>
+                    console.error(`[WEBHOOK] handleStaleCalls error:`, err)
+                );
+            }, STALE_CALL_TIMEOUT_MS);
+            activeWatchdogs.set(watchdogKey, timer);
+        }
+
         return;
+    }
+
+    // Round complete — cancel any watchdog timer
+    const watchdogKey = `${runId}:${round}`;
+    const existingTimer = activeWatchdogs.get(watchdogKey);
+    if (existingTimer) {
+        clearTimeout(existingTimer);
+        activeWatchdogs.delete(watchdogKey);
+        console.log(`[WEBHOOK] Cancelled stale-call watchdog for round ${round} (all calls resolved)`);
     }
 
     console.log(`[WEBHOOK] All round ${round} calls complete for run ${runId} — advancing pipeline`);
 
     if (round === 1) {
-        // CAS: only transition if status is still 'calling_round_1'
         const updated = await prisma.run.updateMany({
             where: { id: runId, status: 'calling_round_1' },
             data: { status: 'negotiating' },
@@ -480,7 +537,6 @@ async function checkRoundCompletion(runId: string, round: number) {
             console.error(`[WEBHOOK] startNegotiationRound error:`, err)
         );
     } else if (round === 2) {
-        // CAS: only transition if status is still 'calling_round_2'
         const updated = await prisma.run.updateMany({
             where: { id: runId, status: 'calling_round_2' },
             data: { status: 'summarizing' },
@@ -494,7 +550,6 @@ async function checkRoundCompletion(runId: string, round: number) {
             console.error(`[WEBHOOK] finalizeSummary error:`, err)
         );
     } else if (round === 3) {
-        // CAS: only transition if status is still 'calling_round_3'
         const updated = await prisma.run.updateMany({
             where: { id: runId, status: 'calling_round_3' },
             data: { status: 'sending_confirmation' },
@@ -507,6 +562,161 @@ async function checkRoundCompletion(runId: string, round: number) {
         sendConfirmationAfterCall(runId).catch(err =>
             console.error(`[WEBHOOK] sendConfirmationAfterCall error:`, err)
         );
+    }
+}
+
+/**
+ * Handle calls stuck in 'pending' or 'in-progress' with no webhook after 50s.
+ *
+ * For each stale call:
+ *   - If it hasn't been retried yet → mark it failed, fire a NEW call (1 retry)
+ *   - If it's already been retried → mark it permanently failed
+ *
+ * After processing, re-check round completion to advance the pipeline.
+ */
+async function handleStaleCalls(runId: string, round: number) {
+    const staleCalls = await prisma.call.findMany({
+        where: { runId, round, status: { notIn: ['completed', 'failed'] } },
+        include: { vendor: true },
+    });
+
+    if (staleCalls.length === 0) {
+        console.log(`[WEBHOOK] Watchdog fired for round ${round} but no stale calls found — already resolved`);
+        return;
+    }
+
+    console.log(`[WEBHOOK] Watchdog: ${staleCalls.length} stale call(s) for round ${round} — checking for retries`);
+
+    for (const staleCall of staleCalls) {
+        const ageMs = Date.now() - new Date(staleCall.createdAt).getTime();
+        const ageSecs = Math.round(ageMs / 1000);
+
+        // Mark the stale call as failed
+        await prisma.call.update({
+            where: { id: staleCall.id },
+            data: { status: 'failed' },
+        });
+
+        // Has this call (or its predecessor for this vendor+round) been retried?
+        const retryKey = `${runId}:${staleCall.vendorId}:${round}`;
+        const alreadyRetried = retriedCalls.has(retryKey);
+
+        if (alreadyRetried) {
+            // Already retried once — permanently failed
+            console.log(`[WEBHOOK] Call permanently failed: ${staleCall.vendor.name} (already retried, age=${ageSecs}s)`);
+            emitRunEvent(runId, {
+                type: 'activity',
+                payload: {
+                    id: makeActivityId(),
+                    type: 'call',
+                    title: `Call failed: ${staleCall.vendor.name}`,
+                    description: `No response after ${ageSecs}s (retry also failed). Skipping this vendor.`,
+                    timestamp: new Date(),
+                    status: 'error',
+                    tool: 'elevenlabs',
+                },
+            });
+        } else {
+            // First timeout — retry once
+            console.log(`[WEBHOOK] Retrying call to ${staleCall.vendor.name} (first timeout after ${ageSecs}s)`);
+            retriedCalls.add(retryKey);
+
+            emitRunEvent(runId, {
+                type: 'activity',
+                payload: {
+                    id: makeActivityId(),
+                    type: 'call',
+                    title: `Retrying call: ${staleCall.vendor.name}`,
+                    description: `No response after ${ageSecs}s — retrying once...`,
+                    timestamp: new Date(),
+                    status: 'running',
+                    tool: 'elevenlabs',
+                },
+            });
+
+            // Fire a new call to the same vendor
+            await retrySingleCall(runId, staleCall.vendor, round).catch(err => {
+                console.error(`[WEBHOOK] Retry call failed for ${staleCall.vendor.name}:`, err);
+            });
+        }
+    }
+
+    // Emit updated calls list
+    await emitCallsChange(runId);
+
+    // Re-check round completion (retried calls will be pending, permanently failed ones won't)
+    console.log(`[WEBHOOK] Watchdog: re-checking round ${round} completion after handling stale calls`);
+    await checkRoundCompletion(runId, round);
+}
+
+/**
+ * Retry a single call to a vendor. Creates a new Call row, assembles context,
+ * and fires the outbound call. Works for any round (1, 2, or 3).
+ */
+async function retrySingleCall(
+    runId: string,
+    vendor: { id: string; name: string; phone: string | null; url: string | null },
+    round: number,
+) {
+    const agentIdQuote = process.env.ELEVENLABS_AGENT_ID_QUOTE;
+    const agentIdNegotiate = process.env.ELEVENLABS_AGENT_ID_NEGOTIATE;
+    const agentPhoneNumberId = process.env.ELEVENLABS_PHONE_NUMBER_ID;
+
+    const agentId = round >= 2 ? (agentIdNegotiate || agentIdQuote) : agentIdQuote;
+    if (!agentId || !agentPhoneNumberId) {
+        console.error(`[WEBHOOK] Cannot retry — missing agent ID or phone number ID`);
+        return;
+    }
+
+    if (!vendor.phone) {
+        console.error(`[WEBHOOK] Cannot retry — vendor ${vendor.name} has no phone number`);
+        return;
+    }
+
+    // Create new placeholder Call row
+    const retryCall = await prisma.call.create({
+        data: {
+            runId,
+            vendorId: vendor.id,
+            round,
+            status: 'pending',
+        },
+    });
+    console.log(`[WEBHOOK] Created retry Call row: id=${retryCall.id} for ${vendor.name} round ${round}`);
+
+    try {
+        // Assemble context (same as original call)
+        const ctx = await assembleOutreachContext(runId, vendor.id);
+        const { dialNumber } = resolveDialNumber(vendor.phone, vendor.id);
+        const dynamicVars = buildDynamicVariables(ctx, runId, vendor.id, round);
+
+        const callResponse = await triggerOutboundCall({
+            agentId,
+            agentPhoneNumberId,
+            toNumber: dialNumber,
+            dynamicVariables: dynamicVars,
+        });
+
+        const callStatus = callResponse.conversation_id ? 'in-progress' : 'failed';
+        await prisma.call.update({
+            where: { id: retryCall.id },
+            data: {
+                conversationId: callResponse.conversation_id,
+                status: callStatus,
+            },
+        });
+
+        if (!callResponse.conversation_id) {
+            console.warn(`[WEBHOOK] Retry conversation_id is null for ${vendor.name} — marked as failed`);
+        } else {
+            console.log(`[WEBHOOK] Retry call placed → ${vendor.name} (${dialNumber}), conversationId=${callResponse.conversation_id}`);
+        }
+    } catch (err) {
+        console.error(`[WEBHOOK] Retry call error for ${vendor.name}:`, err);
+        await prisma.call.update({
+            where: { id: retryCall.id },
+            data: { status: 'failed' },
+        }).catch(e => console.error(`[WEBHOOK] Failed to mark retry call as failed:`, e));
     }
 }
 
@@ -596,11 +806,9 @@ async function startNegotiationRound(runId: string) {
         },
     });
 
-    // Enable services indicator for the strategy generation phase
-    emitRunEvent(runId, {
-        type: 'services_change',
-        payload: { perplexity: false, elasticsearch: true, openai: true, stagehand: false, elevenlabs: true, visa: false },
-    });
+    // Activate services for strategy generation phase
+    activateService(runId, 'elasticsearch');
+    activateService(runId, 'openai');
 
     // ===== PHASE 1: Generate per-vendor negotiation strategies via LLM =====
     // For each vendor: retrieve ES intel → call OpenAI → get tailored strategy
@@ -680,6 +888,10 @@ async function startNegotiationRound(runId: string) {
 
     console.log(`[WEBHOOK] All strategies generated — ${vendorStrategies.size}/${vendorsToNegotiate.length} succeeded`);
 
+    // Strategy generation done — deactivate ES and OpenAI
+    deactivateService(runId, 'elasticsearch');
+    deactivateService(runId, 'openai');
+
     // ===== PHASE 2: Fire negotiation calls with per-vendor strategies =====
     await prisma.run.update({ where: { id: runId }, data: { status: 'calling_round_2' } });
 
@@ -698,10 +910,14 @@ async function startNegotiationRound(runId: string) {
     );
     console.log(`[WEBHOOK] Created ${r2PlaceholderCalls.length} placeholder round 2 Call rows`);
 
+    activateService(runId, 'elevenlabs');
+
     const callPromises = vendorsToNegotiate.map(async (vendor, i) => {
         const placeholderCall = r2PlaceholderCalls[i];
         try {
+            activateService(runId, 'elasticsearch');
             const ctx = await assembleOutreachContext(runId, vendor.id);
+            deactivateService(runId, 'elasticsearch');
             // Inject negotiation context
             ctx.bestPrice = bestPrice;
             ctx.bestSupplier = bestSupplier;
@@ -738,6 +954,7 @@ async function startNegotiationRound(runId: string) {
             console.log(`[WEBHOOK] Round 2 call placed → ${vendor.name} (${dialNumber}), status=${callStatus}`);
         } catch (err) {
             console.error(`[WEBHOOK] Round 2 call failed for ${vendor.name}:`, err);
+            deactivateService(runId, 'elasticsearch');
             // Mark placeholder as failed so checkRoundCompletion doesn't hang
             await prisma.call.update({
                 where: { id: placeholderCall.id },
@@ -774,19 +991,14 @@ async function finalizeSummary(runId: string) {
     // ─── Emit frontend events ────────────────────────────────────────
     const hasMoreWork = winner != null && winner.finalPrice != null;
 
+    // Reset all services — triggerConfirmationCall will re-activate elevenlabs if needed
+    resetServices(runId);
+
     if (!hasMoreWork) {
         // No winner — we're truly done
-        emitRunEvent(runId, {
-            type: 'services_change',
-            payload: { perplexity: false, elasticsearch: false, openai: false, stagehand: false, elevenlabs: false, visa: false },
-        });
         emitRunEvent(runId, { type: 'stage_change', payload: { stage: 'complete' } });
     } else {
-        // Winner found — confirmation call + email still ahead, transition to paying_deposit stage
-        emitRunEvent(runId, {
-            type: 'services_change',
-            payload: { perplexity: false, elasticsearch: false, openai: false, stagehand: false, elevenlabs: true, visa: false },
-        });
+        // Winner found — confirmation call + email still ahead
         emitRunEvent(runId, { type: 'stage_change', payload: { stage: 'paying_deposit' } });
     }
 
@@ -876,10 +1088,7 @@ async function sendConfirmationAfterCall(runId: string) {
         },
     });
 
-    emitRunEvent(runId, {
-        type: 'services_change',
-        payload: { perplexity: false, elasticsearch: false, openai: false, stagehand: false, elevenlabs: false, visa: false },
-    });
+    resetServices(runId);
 
     await sendConfirmationEmailToWinner(runId);
 }

@@ -3,7 +3,6 @@
 import { useState, useCallback, useRef, useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import { Separator } from "@/components/ui/separator"
 import { RequirementsChat } from "@/components/requirements-chat"
 import { RFQForm } from "@/components/rfq-form"
 import { ActivityFeed } from "@/components/activity-feed"
@@ -18,8 +17,6 @@ import {
   Globe,
   Handshake,
   CreditCard,
-  Play,
-  RotateCcw,
   Zap,
   ArrowLeft,
 } from "lucide-react"
@@ -67,6 +64,11 @@ export default function ProcurementAgent() {
   const [dashboardReady, setDashboardReady] = useState(false)
   const cleanupRef = useRef(null)
 
+  // Service hold-time: keep services visually active for a minimum duration
+  // so the user can actually see them light up (backend cycles are too fast)
+  const backendServicesRef = useRef(DEFAULT_SERVICES)
+  const serviceTimersRef = useRef({})
+
   const isRunning = stage !== "idle" && stage !== "complete" && stage !== "invoice_received"
 
   const handleChatComplete = useCallback((parsedRfq) => {
@@ -83,6 +85,9 @@ export default function ProcurementAgent() {
     setCalls([])
     setSummary(null)
     setActiveServices(DEFAULT_SERVICES)
+    backendServicesRef.current = DEFAULT_SERVICES
+    Object.values(serviceTimersRef.current).forEach((t) => clearTimeout(t))
+    serviceTimersRef.current = {}
 
     cleanupRef.current?.()
 
@@ -126,9 +131,37 @@ export default function ProcurementAgent() {
             case 'summary':
               setSummary(event.payload)
               break
-            case 'services_change':
-              setActiveServices(event.payload)
+            case 'services_change': {
+              const svcPayload = event.payload
+              backendServicesRef.current = svcPayload
+              setActiveServices((prev) => {
+                const next = { ...prev }
+                for (const key of Object.keys(svcPayload)) {
+                  if (svcPayload[key]) {
+                    // Service is active — show immediately, cancel any pending off-timer
+                    next[key] = true
+                    if (serviceTimersRef.current[key]) {
+                      clearTimeout(serviceTimersRef.current[key])
+                      delete serviceTimersRef.current[key]
+                    }
+                  } else if (prev[key] && !svcPayload[key]) {
+                    // Was on, now off — hold it visually active for 2s minimum
+                    next[key] = true
+                    if (!serviceTimersRef.current[key]) {
+                      serviceTimersRef.current[key] = setTimeout(() => {
+                        if (!backendServicesRef.current[key]) {
+                          setActiveServices((curr) => ({ ...curr, [key]: false }))
+                        }
+                        delete serviceTimersRef.current[key]
+                      }, 2000)
+                    }
+                  }
+                  // If both prev and payload are false, stays false (no change needed)
+                }
+                return next
+              })
               break
+            }
             case 'email_sent':
               // Confirmation email was sent to winning vendor
               console.log('Email sent to vendor:', event.payload.vendorName, event.payload.vendorEmail)
@@ -177,6 +210,9 @@ export default function ProcurementAgent() {
     setSummary(null)
     setActiveServices(DEFAULT_SERVICES)
     setEverActive(DEFAULT_SERVICES)
+    backendServicesRef.current = DEFAULT_SERVICES
+    Object.values(serviceTimersRef.current).forEach((t) => clearTimeout(t))
+    serviceTimersRef.current = {}
     hasAutoStarted.current = false
     setDashboardReady(false)
   }, [])
@@ -322,29 +358,6 @@ export default function ProcurementAgent() {
                 })}
               </div>
 
-              <Separator className="my-3" />
-
-              <div className="flex gap-2">
-                {stage === "idle" ? (
-                  <Button
-                    onClick={handleStart}
-                    className="flex-1 bg-primary text-primary-foreground hover:bg-primary/90 h-9"
-                    disabled={!rfq.item}
-                  >
-                    <Play className="h-4 w-4 mr-2" />
-                    Run Agent
-                  </Button>
-                ) : (
-                  <Button
-                    onClick={handleReset}
-                    variant="outline"
-                    className="flex-1 h-9"
-                  >
-                    <RotateCcw className="h-4 w-4 mr-2" />
-                    Reset
-                  </Button>
-                )}
-              </div>
             </div>
           </div>
 
@@ -408,8 +421,8 @@ export default function ProcurementAgent() {
                   wasActive={everActive.stagehand}
                 />
                 <ServiceItem
-                  label="ElevenLabs + Decagon"
-                  description="Real-time voice agent"
+                  label="ElevenLabs Voice Agent"
+                  description="Real-time voice calls & STT"
                   active={activeServices.elevenlabs}
                   wasActive={everActive.elevenlabs}
                 />
@@ -420,7 +433,7 @@ export default function ProcurementAgent() {
                   wasActive={everActive.elasticsearch}
                 />
                 <ServiceItem
-                  label="OpenAI GPT-4o-mini"
+                  label="Negotiating"
                   description="Extraction & negotiation strategy"
                   active={activeServices.openai}
                   wasActive={everActive.openai}

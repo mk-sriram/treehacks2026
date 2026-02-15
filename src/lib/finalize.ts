@@ -2,7 +2,7 @@
 // Resolves offers to per-vendor winners, triggers round 3 call, sends email.
 
 import { prisma } from './db';
-import { emitRunEvent } from './events';
+import { emitRunEvent, activateService, deactivateService, resetServices } from './events';
 import { sendConfirmationEmail } from './agentmail';
 import { triggerOutboundCall, resolveDialNumber } from './elevenlabs';
 
@@ -150,10 +150,7 @@ export async function triggerConfirmationCall(runId: string, winner: ResolvedWin
 
     const { dialNumber, isOverridden } = resolveDialNumber(winner.vendorPhone ?? '', winner.vendorId);
 
-    emitRunEvent(runId, {
-        type: 'services_change',
-        payload: { perplexity: false, elasticsearch: false, openai: false, stagehand: false, elevenlabs: true, visa: false },
-    });
+    activateService(runId, 'elevenlabs');
 
     const callActivityId = makeActivityId();
     emitRunEvent(runId, {
@@ -272,10 +269,7 @@ export async function sendConfirmationEmailToWinner(runId: string) {
     if (!winner) {
         console.log(`[FINALIZE] No winner — marking complete`);
         await prisma.run.update({ where: { id: runId }, data: { status: 'complete' } });
-        emitRunEvent(runId, {
-            type: 'services_change',
-            payload: { perplexity: false, elasticsearch: false, openai: false, stagehand: false, elevenlabs: false, visa: false },
-        });
+        resetServices(runId);
         emitRunEvent(runId, { type: 'stage_change', payload: { stage: 'complete' } });
         return;
     }
@@ -295,10 +289,7 @@ export async function sendConfirmationEmailToWinner(runId: string) {
             },
         });
         await prisma.run.update({ where: { id: runId }, data: { status: 'complete' } });
-        emitRunEvent(runId, {
-            type: 'services_change',
-            payload: { perplexity: false, elasticsearch: false, openai: false, stagehand: false, elevenlabs: false, visa: false },
-        });
+        resetServices(runId);
         emitRunEvent(runId, { type: 'stage_change', payload: { stage: 'complete' } });
         return;
     }
@@ -378,10 +369,7 @@ export async function sendConfirmationEmailToWinner(runId: string) {
     await prisma.run.update({ where: { id: runId }, data: { status: finalStatus } });
 
     // Emit final stage + services so frontend shows completion
-    emitRunEvent(runId, {
-        type: 'services_change',
-        payload: { perplexity: false, elasticsearch: false, openai: false, stagehand: false, elevenlabs: false, visa: false },
-    });
+    resetServices(runId);
     emitRunEvent(runId, { type: 'stage_change', payload: { stage: 'complete' } });
 
     console.log(`[FINALIZE] Run ${runId} → ${finalStatus}`);

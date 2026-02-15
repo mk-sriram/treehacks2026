@@ -1,4 +1,4 @@
-import { eventBus } from '@/lib/events';
+import { eventBus, getCurrentServiceState } from '@/lib/events';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -29,6 +29,14 @@ export async function GET(
 
       eventBus.on(`run:${runId}`, handler);
       console.log(`[API SSE] Subscribed to eventBus for run:${runId}`);
+
+      // Replay current service state to handle the race condition where
+      // the orchestrator emitted events before this SSE connection opened
+      const currentServices = getCurrentServiceState(runId);
+      if (currentServices) {
+        handler({ type: 'services_change', payload: currentServices });
+        console.log(`[API SSE] Replayed current service state for run:${runId}`);
+      }
 
       // Keepalive every 15s to prevent timeouts
       const keepalive = setInterval(() => {

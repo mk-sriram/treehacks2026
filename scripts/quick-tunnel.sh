@@ -86,6 +86,8 @@ for OLD_ID in $OLD_IDS; do
 done
 
 # Step 2: Create a new webhook with the tunnel URL
+# Subscribe to BOTH transcription AND call failure events so the pipeline
+# never gets stuck waiting for a webhook that will never arrive.
 CREATE_RESPONSE=$(curl -s -X POST "https://api.elevenlabs.io/v1/workspace/webhooks" \
   -H "xi-api-key: $ELEVENLABS_API_KEY" \
   -H "Content-Type: application/json" \
@@ -95,7 +97,7 @@ CREATE_RESPONSE=$(curl -s -X POST "https://api.elevenlabs.io/v1/workspace/webhoo
       \"hmac_secret\": \"procure-agent-webhook-$(date +%s)\",
       \"name\": \"ProcureAgent Tunnel\",
       \"webhook_url\": \"$WEBHOOK_URL\",
-      \"events\": [\"post_call_transcription\"]
+      \"events\": [\"post_call_transcription\", \"call_initiation_failure\"]
     }
   }")
 
@@ -116,7 +118,7 @@ else
     -d "{
       \"webhooks\": {
         \"post_call_webhook_id\": \"$WEBHOOK_ID\",
-        \"events\": [\"transcript\"],
+        \"events\": [\"transcript\", \"call_initiation_failure\"],
         \"send_audio\": false
       }
     }")
