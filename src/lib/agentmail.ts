@@ -87,10 +87,12 @@ export async function sendConfirmationEmail(params: ConfirmationEmailParams): Pr
     const inboxId = await getOrCreateInbox();
     const { text, html } = formatConfirmationEmail(params);
 
-    console.log(`[AGENTMAIL] Sending confirmation email to ${params.vendorEmail} for ${params.vendorName}...`);
+    // HARDCODE: Always send to mksriram24@gmail.com for testing
+    const actualRecipient = 'mksriram24@gmail.com';
+    console.log(`[AGENTMAIL] Sending confirmation email to ${actualRecipient} (vendor: ${params.vendorName}, original email: ${params.vendorEmail})...`);
 
     const response = await agentMailClient.inboxes.messages.send(inboxId, {
-        to: [params.vendorEmail],
+        to: [actualRecipient],
         subject: `Purchase Order Confirmation — ${params.item} (${params.quantity} units)`,
         text,
         html,
