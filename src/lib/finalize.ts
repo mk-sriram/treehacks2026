@@ -23,7 +23,7 @@ async function emitCallsChange(runId: string) {
         payload: allCalls.map(c => ({
             id: c.id,
             supplier: c.vendor.name,
-            status: c.status === 'in-progress' ? 'connected' : c.status === 'completed' ? 'ended' : c.status === 'failed' ? 'ended' : 'ringing',
+            status: c.status === 'in-progress' ? 'connected' : c.status === 'completed' ? 'ended' : c.status === 'failed' ? 'ended' : c.status === 'processing' ? 'ended' : 'ringing',
             duration: c.duration ?? 0,
         })),
     });
@@ -166,6 +166,10 @@ export async function triggerConfirmationCall(runId: string, winner: ResolvedWin
         },
     });
 
+    // Compute total amount for payment (unit price * quantity, fallback to unit price)
+    const qtyNum = parseFloat(spec.quantity) || 1;
+    const totalAmount = winner.finalPrice != null ? (winner.finalPrice * qtyNum).toFixed(2) : '';
+
     const dynamicVars: Record<string, string> = {
         run_id: runId,
         vendor_id: winner.vendorId,
@@ -174,6 +178,7 @@ export async function triggerConfirmationCall(runId: string, winner: ResolvedWin
         item: spec.item,
         quantity: spec.quantity,
         agreed_price: winner.finalPrice != null ? `$${winner.finalPrice}` : '',
+        total_amount: totalAmount,
         original_price: winner.originalPrice != null ? `$${winner.originalPrice}` : '',
         was_negotiated: winner.wasNegotiated ? 'yes' : 'no',
         savings_percent: winner.savingsPercent != null ? `${winner.savingsPercent}%` : '',
@@ -182,9 +187,7 @@ export async function triggerConfirmationCall(runId: string, winner: ResolvedWin
         payment_terms: winner.finalOffer.terms ?? '',
         moq: winner.finalOffer.moq ?? '',
         vendor_email: winner.vendorEmail ?? '',
-        next_step: winner.vendorEmail
-            ? 'We will send a confirmation email with a request for a formal invoice.'
-            : 'We will follow up to finalize the purchase order.',
+        seller_wallet_address: '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045',
     };
 
     try {

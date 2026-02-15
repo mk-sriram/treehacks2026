@@ -101,10 +101,10 @@ function ActivityRow({ activity }) {
   return (
     <div
       className={cn(
-        "flex gap-3 p-3 rounded-lg border transition-all duration-500",
+        "flex gap-3 p-3 rounded-xl border transition-all duration-300",
         activity.status === "running"
-          ? "bg-card border-primary/20"
-          : "bg-card/50 border-border/30"
+          ? "bg-card border-primary/25 shadow-sm"
+          : "bg-card/50 border-border/40"
       )}
     >
       <div
@@ -151,11 +151,11 @@ function ParallelGroup({ activities }) {
 
   return (
     <div className={cn(
-      "relative rounded-lg border p-3 transition-all duration-500",
+      "relative rounded-xl border p-3 transition-all duration-300",
       someRunning
-        ? "border-primary/20 bg-primary/[0.02]"
+        ? "border-primary/25 bg-primary/[0.03] shadow-sm"
         : allDone
-        ? "border-border/30 bg-card/30"
+        ? "border-border/40 bg-card/40"
         : "border-border/50 bg-card/50"
     )}>
       <div className="flex items-center gap-2 mb-2">

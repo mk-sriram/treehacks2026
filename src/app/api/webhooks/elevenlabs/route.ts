@@ -37,7 +37,7 @@ async function emitCallsChange(runId: string) {
         payload: allCalls.map(c => ({
             id: c.id,
             supplier: c.vendor.name,
-            status: c.status === 'in-progress' ? 'connected' : c.status === 'completed' ? 'ended' : c.status === 'failed' ? 'ended' : 'ringing',
+            status: c.status === 'in-progress' ? 'connected' : c.status === 'completed' ? 'ended' : c.status === 'failed' ? 'ended' : c.status === 'processing' ? 'ended' : 'ringing',
             duration: c.duration ?? 0,
         })),
     });
@@ -154,16 +154,18 @@ async function processPostCallTranscription(body: any) {
 
     console.log(`[WEBHOOK] Mapped to — runId=${call.runId}, vendor=${call.vendor.name}, round=${call.round}`);
 
-    // 2. Update the Call row with transcript + status
+    // 2. Update the Call row with transcript + status.
+    //    Use 'processing' (not 'completed') so checkRoundCompletion still treats
+    //    this call as pending while offer extraction + ES indexing finish.
     await prisma.call.update({
         where: { id: call.id },
         data: {
             transcript: transcriptText,
-            status: 'completed',
+            status: 'processing',
             duration: callDurationSecs ? Math.round(callDurationSecs) : null,
         },
     });
-    console.log(`[WEBHOOK] Call row updated — status=completed, duration=${callDurationSecs ?? 'unknown'}s`);
+    console.log(`[WEBHOOK] Call row updated — status=processing, duration=${callDurationSecs ?? 'unknown'}s`);
 
     // Call completed → deactivate this call's elevenlabs reference
     deactivateService(call.runId, 'elevenlabs');
@@ -269,12 +271,17 @@ async function processPostCallTranscription(body: any) {
         },
     });
 
+    // 6. Mark call as fully completed (extraction + ES done), then check round.
+    //    Defer the round-completion check by 3s so other in-flight webhooks
+    //    have time to finish extraction before we advance the pipeline.
+    await prisma.call.update({ where: { id: call.id }, data: { status: 'completed' } });
     console.log(`[WEBHOOK] Done processing transcription for ${call.vendor.name}`);
 
-    // 6. Check if all calls for this round are done — advance the pipeline
-    checkRoundCompletion(call.runId, call.round).catch(err =>
-        console.error(`[WEBHOOK] checkRoundCompletion error (non-fatal):`, err)
-    );
+    setTimeout(() => {
+        checkRoundCompletion(call.runId, call.round).catch(err =>
+            console.error(`[WEBHOOK] checkRoundCompletion error (non-fatal):`, err)
+        );
+    }, 3000);
 }
 
 // ─── call_initiation_failure processor (runs in background) ──────────
@@ -739,15 +746,28 @@ async function startNegotiationRound(runId: string) {
         return;
     }
 
-    // Get round 1 results to populate competitive intelligence
+    // Get round 1 offers for competitive intelligence
     const round1Offers = await prisma.offer.findMany({
         where: { vendor: { runId }, source: 'voice-call-r1' },
         include: { vendor: true },
         orderBy: { unitPrice: 'asc' },
     });
 
-    if (round1Offers.length < 2) {
-        console.log(`[WEBHOOK] Only ${round1Offers.length} round 1 offers — not enough to negotiate. Skipping to summary.`);
+    // Get ALL vendors who had round 1 calls (whether or not an offer was extracted)
+    const round1Calls = await prisma.call.findMany({
+        where: { runId, round: 1, status: 'completed' },
+        include: { vendor: true },
+    });
+
+    // All vendors who completed a round 1 call are eligible for negotiation
+    // Deduplicate by vendor ID (retried calls create extra rows for the same vendor)
+    const seenVendorIds = new Set<string>();
+    const allR1Vendors = round1Calls
+        .map(c => c.vendor)
+        .filter(v => { if (seenVendorIds.has(v.id)) return false; seenVendorIds.add(v.id); return true; });
+
+    if (allR1Vendors.length === 0) {
+        console.log(`[WEBHOOK] No completed round 1 calls — skipping negotiation`);
         await prisma.run.update({ where: { id: runId }, data: { status: 'summarizing' } });
         finalizeSummary(runId).catch(console.error);
         return;
@@ -758,14 +778,17 @@ async function startNegotiationRound(runId: string) {
     round1Offers.forEach((o, idx) => {
         console.log(`  [${idx}] ${o.vendor.name} — $${o.unitPrice}/unit, lead=${o.leadTimeDays}d, vendorId=${o.vendorId}`);
     });
+    console.log(`[WEBHOOK] Round 1 completed calls: ${allR1Vendors.map(v => v.name).join(', ')}`);
 
-    const bestOffer = round1Offers[0];
-    const bestPrice = bestOffer.unitPrice != null ? String(bestOffer.unitPrice) : '';
-    const bestSupplier = bestOffer.vendor.name;
-    console.log(`[WEBHOOK] Best offer: ${bestSupplier} at $${bestPrice}/unit (vendorId=${bestOffer.vendorId})`);
+    const bestOffer = round1Offers.length > 0 ? round1Offers[0] : null;
+    const bestPrice = bestOffer?.unitPrice != null ? String(bestOffer.unitPrice) : '';
+    const bestSupplier = bestOffer?.vendor.name ?? '';
+    if (bestOffer) {
+        console.log(`[WEBHOOK] Best offer: ${bestSupplier} at $${bestPrice}/unit (vendorId=${bestOffer.vendorId})`);
+    }
 
     // Target 10-15% below best price
-    const targetPrice = bestOffer.unitPrice != null
+    const targetPrice = bestOffer?.unitPrice != null
         ? String(Math.round(bestOffer.unitPrice * 0.87 * 100) / 100)
         : '';
 
@@ -774,13 +797,15 @@ async function startNegotiationRound(runId: string) {
         .map(o => `${o.vendor.name}: $${o.unitPrice}/unit, ${o.leadTimeDays ?? '?'} day lead time`)
         .join('; ');
 
-    // Negotiate with all vendors EXCEPT the one with the best (lowest) price
-    const vendorsToNegotiate = round1Offers
-        .filter(o => o.vendorId !== bestOffer.vendorId)
-        .map(o => o.vendor);
+    // Negotiate with all R1-called vendors EXCEPT the one with the best (lowest) price
+    const vendorsToNegotiate = bestOffer
+        ? allR1Vendors.filter(v => v.id !== bestOffer.vendorId)
+        : allR1Vendors;
 
     console.log(`[WEBHOOK] Vendors selected for negotiation: ${vendorsToNegotiate.map(v => v.name).join(', ')}`);
-    console.log(`[WEBHOOK] Vendor EXCLUDED (best price): ${bestSupplier}`);
+    if (bestOffer) {
+        console.log(`[WEBHOOK] Vendor EXCLUDED (best price): ${bestSupplier}`);
+    }
 
     if (vendorsToNegotiate.length === 0) {
         console.log(`[WEBHOOK] No vendors to negotiate with — skipping to summary`);
@@ -844,11 +869,11 @@ async function startNegotiationRound(runId: string) {
                 runId,
                 item: spec.item,
                 quantity: spec.quantity,
-                r1UnitPrice: vendorR1Offer?.unitPrice ?? null,
-                r1Moq: vendorR1Offer?.moq ?? null,
-                r1LeadTimeDays: vendorR1Offer?.leadTimeDays ?? null,
-                r1Terms: vendorR1Offer?.terms ?? null,
-                r1Transcript: vendorR1Offer?.rawEvidence ?? null,
+                r1UnitPrice: typeof vendorR1Offer === 'object' && vendorR1Offer !== null && 'unitPrice' in vendorR1Offer ? (vendorR1Offer as any).unitPrice ?? null : null,
+                r1Moq: typeof vendorR1Offer === 'object' && vendorR1Offer !== null && 'moq' in vendorR1Offer ? (vendorR1Offer as any).moq ?? null : null,
+                r1LeadTimeDays: typeof vendorR1Offer === 'object' && vendorR1Offer !== null && 'leadTimeDays' in vendorR1Offer ? (vendorR1Offer as any).leadTimeDays ?? null : null,
+                r1Terms: typeof vendorR1Offer === 'object' && vendorR1Offer !== null && 'terms' in vendorR1Offer ? (vendorR1Offer as any).terms ?? null : null,
+                r1Transcript: typeof vendorR1Offer === 'object' && vendorR1Offer !== null && 'rawEvidence' in vendorR1Offer ? (vendorR1Offer as any).rawEvidence ?? null : null,
                 bestPrice: `$${bestPrice}`,
                 bestSupplier,
                 allCompetingOffers: competingText,

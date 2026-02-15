@@ -47,9 +47,9 @@ export function QuotesPanel({ quotes }) {
             <div
               key={i}
               className={cn(
-                "rounded-lg border p-3 transition-all",
+                "rounded-xl border p-3 transition-all duration-300",
                 isBest
-                  ? "bg-primary/5 border-primary/30"
+                  ? "bg-primary/5 border-primary/30 shadow-sm"
                   : "bg-card/50 border-border/50"
               )}
             >

@@ -45,7 +45,7 @@ function AudioLine({ active }) {
         return
       }
 
-      const greenHsl = "142, 71%, 45%"
+      const greenHsl = "199, 89%, 48%"
       const time = frameRef.current * 0.035 + phaseRef.current
 
       // Main wave
@@ -145,11 +145,11 @@ function SingleCallRow({ call }) {
   return (
     <div
       className={cn(
-        "rounded-lg border p-3 transition-all duration-500",
+        "rounded-xl border p-3 transition-all duration-300",
         isConnected
-          ? "bg-primary/[0.04] border-primary/20"
+          ? "bg-primary/[0.05] border-primary/25 shadow-sm"
           : isEnded
-          ? "bg-muted/20 border-border/20"
+          ? "bg-muted/30 border-border/30"
           : "bg-card border-border/50"
       )}
     >
@@ -258,7 +258,7 @@ export function PhoneCallPanel({ calls }) {
     return (
       <button
         onClick={() => setManualExpand(true)}
-        className="w-full rounded-lg border border-border/50 bg-card px-4 py-2.5 flex items-center justify-between hover:bg-muted/30 transition-colors group"
+        className="w-full rounded-xl border border-border/50 bg-card/95 px-4 py-2.5 flex items-center justify-between hover:bg-muted/40 transition-colors duration-200 group"
       >
         <div className="flex items-center gap-2">
           <div className="flex items-center justify-center w-5 h-5 rounded-full bg-muted text-muted-foreground/40">
@@ -276,7 +276,7 @@ export function PhoneCallPanel({ calls }) {
   }
 
   return (
-    <div className="rounded-lg border border-border/50 bg-card p-4">
+    <div className="rounded-xl border border-border/50 bg-card/95 shadow-sm p-4">
       <div className="flex items-center justify-between mb-3">
         <h2 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
           Voice Calls

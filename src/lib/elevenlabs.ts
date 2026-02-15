@@ -82,11 +82,16 @@ export async function triggerOutboundCall(
  * These are pure DATA — no prompt text. The agent prompt on the
  * ElevenLabs dashboard references them via {{variable_name}}.
  *
+ * Canonical prompt: see prompts/negotiation_agent_prompt.md
+ *
  * Variables available in the dashboard prompt:
  *   {{vendor_name}}, {{vendor_phone}}, {{vendor_url}}, {{vendor_notes}},
  *   {{item}}, {{quantity}}, {{deadline}}, {{quality}},
  *   {{indicative_pricing}}, {{competing_offers}}, {{past_history}},
  *   {{best_price}}, {{best_supplier}}, {{target_price}}, {{negotiation_plan}} (round 2 only)
+ *
+ * Note: best_price = LOWEST competing offer; target_price = our goal (lower than best).
+ * Lower numeric price = better for procurement.
  */
 export function buildDynamicVariables(
     ctx: OutreachContext,

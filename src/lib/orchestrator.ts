@@ -374,7 +374,7 @@ export async function runOrchestrator(runId: string) {
                             payload: allCalls.map(c => ({
                                 id: c.id,
                                 supplier: c.vendor.name,
-                                status: c.status === 'in-progress' ? 'connected' : c.status === 'completed' ? 'ended' : c.status === 'failed' ? 'ended' : 'ringing',
+                                status: c.status === 'in-progress' ? 'connected' : c.status === 'completed' ? 'ended' : c.status === 'failed' ? 'ended' : c.status === 'processing' ? 'ended' : 'ringing',
                                 duration: c.duration ?? 0,
                             })),
                         });

@@ -9,6 +9,7 @@ import { ActivityFeed } from "@/components/activity-feed"
 import { PhoneCallPanel } from "@/components/phone-call-panel"
 import { QuotesPanel } from "@/components/quotes-panel"
 import { SummaryPanel } from "@/components/summary-panel"
+// import { PaymentOverlay } from "@/components/payment-overlay"
 // import { simulateWorkflow } from "@/lib/agent-store"
 import { cn } from "@/lib/utils"
 import {
@@ -43,7 +44,7 @@ const DEFAULT_SERVICES = {
   elevenlabs: false,
   elasticsearch: false,
   openai: false,
-  visa: false,
+  payment: false,
 }
 
 export default function ProcurementAgent() {
@@ -61,6 +62,7 @@ export default function ProcurementAgent() {
   const [calls, setCalls] = useState([])
   const [summary, setSummary] = useState(null)
   const [activeServices, setActiveServices] = useState(DEFAULT_SERVICES)
+  // const [paymentConfirmed, setPaymentConfirmed] = useState(null)
   const [dashboardReady, setDashboardReady] = useState(false)
   const cleanupRef = useRef(null)
 
@@ -73,10 +75,8 @@ export default function ProcurementAgent() {
 
   const handleChatComplete = useCallback((parsedRfq) => {
     setRfq(parsedRfq)
-    setView("dashboard")
-    setTimeout(() => {
-      setDashboardReady(true)
-    }, 600)
+    setView("transitioning")
+    setDashboardReady(true)
   }, [])
 
   const handleStart = useCallback(async () => {
@@ -166,6 +166,10 @@ export default function ProcurementAgent() {
               // Confirmation email was sent to winning vendor
               console.log('Email sent to vendor:', event.payload.vendorName, event.payload.vendorEmail)
               break
+            case 'payment_confirmed':
+              // Payment confirmed — activity feed handles this now
+              console.log('Payment confirmed:', event.payload.vendor_name, event.payload.amount)
+              break
             case 'invoice_received':
               // Vendor replied with an invoice
               console.log('Invoice received from:', event.payload.vendorName)
@@ -223,6 +227,13 @@ export default function ProcurementAgent() {
     setRfq({ item: "", quantity: "", leadTime: "", quality: "", location: "" })
   }, [handleReset])
 
+  // After chat fades out, switch to dashboard (chat unmounts, dashboard becomes visible)
+  useEffect(() => {
+    if (view !== "transitioning") return
+    const t = setTimeout(() => setView("dashboard"), 1400)
+    return () => clearTimeout(t)
+  }, [view])
+
   const currentIndex =
     stage === "complete" ? 6 : stage === "idle" ? 0 : STAGE_INDEX[stage] ?? 0
 
@@ -244,211 +255,226 @@ export default function ProcurementAgent() {
     }
   }
 
-  if (view === "chat") {
-    return <RequirementsChat onComplete={handleChatComplete} />
-  }
+  const showDashboard = view === "transitioning" || view === "dashboard"
+  const showChat = view === "chat" || view === "transitioning"
 
   return (
-    <div className={cn(
-      "min-h-screen bg-background flex flex-col transition-all duration-500",
-      !dashboardReady && "opacity-0 translate-y-4",
-      dashboardReady && "opacity-100 translate-y-0"
-    )}>
-      {/* Header */}
-      <header className="border-b border-border/50 bg-card/50 backdrop-blur-sm sticky top-0 z-10">
-        <div className="max-w-[1600px] mx-auto px-4 lg:px-6 h-14 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <button
-              onClick={handleBackToChat}
-              className="flex items-center justify-center w-8 h-8 rounded-md hover:bg-secondary transition-colors text-muted-foreground hover:text-foreground"
-              aria-label="Back to chat"
-            >
-              <ArrowLeft className="h-4 w-4" />
-            </button>
-            <div className="flex items-center justify-center w-8 h-8 rounded-md bg-primary/20">
-              <Zap className="h-4 w-4 text-primary" />
-            </div>
-            <div className="flex flex-col">
-              <span className="text-sm font-semibold text-foreground leading-tight">
-                Procurement Agent
-              </span>
-              <span className="text-[10px] text-muted-foreground leading-tight font-mono truncate max-w-[300px]">
-                {rfq.item}
-              </span>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-3">
-            <Badge
-              variant="outline"
-              className={
-                isRunning
-                  ? "bg-primary/10 text-primary border-primary/30 text-[10px]"
-                  : stage === "complete"
-                  ? "bg-primary/10 text-primary border-primary/30 text-[10px]"
-                  : "text-muted-foreground text-[10px]"
-              }
-            >
-              {isRunning && (
-                <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse mr-1.5" />
-              )}
-              {stage === "idle"
-                ? "Ready"
-                : stage === "complete"
-                ? "Complete"
-                : "Agent Running"}
-            </Badge>
-          </div>
-        </div>
-      </header>
-
-      {/* Main Content */}
-      <main className="flex-1 max-w-[1600px] mx-auto w-full px-4 lg:px-6 py-6">
-        <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr_320px] gap-6 h-[calc(100vh-110px)]">
-          {/* Left Panel */}
-          <div className="flex flex-col gap-4 overflow-y-auto">
-            <div className="rounded-lg border border-border/50 bg-card p-4">
-              <h2 className="text-xs font-medium uppercase tracking-wider text-muted-foreground mb-3">
-                Request for Quote
-              </h2>
-              <RFQForm rfq={rfq} onChange={setRfq} disabled={isRunning} />
-            </div>
-
-            <div className="rounded-lg border border-border/50 bg-card p-4">
-              <h2 className="text-xs font-medium uppercase tracking-wider text-muted-foreground mb-3">
-                Agent Actions
-              </h2>
-              <div className="flex flex-col gap-2">
-                {ACTION_BUTTONS.map((btn) => {
-                  const Icon = btn.icon
-                  const isActiveAction = btn.stage === stage
-                  const btnIndex = STAGE_INDEX[btn.stage]
-                  const isDone = currentIndex > btnIndex
-
-                  return (
-                    <Button
-                      key={btn.stage}
-                      variant="outline"
-                      size="sm"
-                      disabled
-                      className={
-                        isActiveAction
-                          ? "justify-start gap-2 border-primary/30 bg-primary/10 text-primary opacity-100 h-9"
-                          : isDone
-                          ? "justify-start gap-2 border-primary/20 bg-primary/5 text-primary/70 opacity-100 h-9"
-                          : "justify-start gap-2 text-muted-foreground h-9"
-                      }
-                    >
-                      <Icon className="h-4 w-4" />
-                      {btn.label}
-                      {isActiveAction && (
-                        <span className="ml-auto flex gap-1">
-                          <span className="w-1 h-1 rounded-full bg-primary animate-pulse" />
-                          <span className="w-1 h-1 rounded-full bg-primary animate-pulse [animation-delay:200ms]" />
-                          <span className="w-1 h-1 rounded-full bg-primary animate-pulse [animation-delay:400ms]" />
-                        </span>
-                      )}
-                      {isDone && !isActiveAction && (
-                        <span className="ml-auto text-[10px] text-primary/60">
-                          Done
-                        </span>
-                      )}
-                    </Button>
-                  )
-                })}
-              </div>
-
-            </div>
-          </div>
-
-          {/* Center Panel */}
-          <div className="flex flex-col gap-4 min-h-0">
-            {calls.length > 0 && <PhoneCallPanel calls={calls} />}
-            {summary && <SummaryPanel summary={summary} />}
-
-            <div className="flex-1 rounded-lg border border-border/50 bg-card p-4 min-h-0 flex flex-col">
-              <div className="flex items-center justify-between mb-3">
-                <h2 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                  Agent Activity
-                </h2>
-                {activities.length > 0 && (
-                  <span className="text-[10px] font-mono text-muted-foreground/60">
-                    {activities.length} actions
+    <div className="relative min-h-screen">
+      {/* Dashboard - visible as soon as transitioning or dashboard */}
+      {showDashboard && (
+        <div className={cn(
+          "min-h-screen bg-background flex flex-col transition-all duration-500 ease-out",
+          (view === "transitioning" || !dashboardReady) && "opacity-0 translate-y-4 pointer-events-none",
+          view === "dashboard" && dashboardReady && "opacity-100 translate-y-0"
+        )}>
+          {/* Header */}
+          <header className="border-b border-border/60 bg-card/60 backdrop-blur-md sticky top-0 z-10">
+            <div className="max-w-[1600px] mx-auto px-4 lg:px-6 h-14 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={handleBackToChat}
+                  className="flex items-center justify-center w-8 h-8 rounded-md hover:bg-secondary/80 transition-colors duration-200 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+                  aria-label="Back to chat"
+                >
+                  <ArrowLeft className="h-4 w-4" />
+                </button>
+                <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-primary/15 border border-primary/10">
+                  <Zap className="h-4 w-4 text-primary" />
+                </div>
+                <div className="flex flex-col">
+                  <span className="text-sm font-semibold text-foreground leading-tight font-[family-name:var(--font-display)] tracking-tight">
+                    Procure
                   </span>
-                )}
-              </div>
-              <div className="flex-1 min-h-0">
-                <ActivityFeed activities={activities} />
-              </div>
-            </div>
-          </div>
-
-          {/* Right Panel */}
-          <div className="flex flex-col gap-4 overflow-y-auto">
-            {quotes.length > 0 && (
-              <div className="rounded-lg border border-border/50 bg-card p-4">
-                <QuotesPanel quotes={quotes} />
-              </div>
-            )}
-
-            {quotes.length === 0 && stage !== "idle" && (
-              <div className="rounded-lg border border-border/50 bg-card p-4 flex items-center justify-center min-h-[200px]">
-                <div className="text-center text-muted-foreground/50">
-                  <p className="text-sm">Awaiting quotes...</p>
-                  <p className="text-xs mt-1">
-                    Quotes will appear here as they arrive
-                  </p>
+                  <span className="text-[10px] text-muted-foreground leading-tight font-mono truncate max-w-[300px]">
+                    {rfq.item}
+                  </span>
                 </div>
               </div>
-            )}
 
-            {/* Connected Services */}
-            <div className="rounded-lg border border-border/50 bg-card p-4">
-              <h2 className="text-xs font-medium uppercase tracking-wider text-muted-foreground mb-3">
-                Connected Services
-              </h2>
-              <div className="flex flex-col gap-0.5">
-                <ServiceItem
-                  label="Perplexity Sonar"
-                  description="Market intelligence & citations"
-                  active={activeServices.perplexity}
-                  wasActive={everActive.perplexity}
-                />
-                <ServiceItem
-                  label="Browserbase Stagehand"
-                  description="Web actions, form fill, extract"
-                  active={activeServices.stagehand}
-                  wasActive={everActive.stagehand}
-                />
-                <ServiceItem
-                  label="ElevenLabs Voice Agent"
-                  description="Real-time voice calls & STT"
-                  active={activeServices.elevenlabs}
-                  wasActive={everActive.elevenlabs}
-                />
-                <ServiceItem
-                  label="Elasticsearch"
-                  description="Hybrid memory retrieval (RRF)"
-                  active={activeServices.elasticsearch}
-                  wasActive={everActive.elasticsearch}
-                />
-                <ServiceItem
-                  label="Negotiating"
-                  description="Extraction & negotiation strategy"
-                  active={activeServices.openai}
-                  wasActive={everActive.openai}
-                />
-                <ServiceItem
-                  label="Visa B2B + Coinbase"
-                  description="Payment rails & agent wallet"
-                  active={activeServices.visa}
-                  wasActive={everActive.visa}
-                />
+              <div className="flex items-center gap-3">
+                <Badge
+                  variant="outline"
+                  className={
+                    isRunning
+                      ? "bg-primary/10 text-primary border-primary/30 text-[10px]"
+                      : stage === "complete"
+                      ? "bg-primary/10 text-primary border-primary/30 text-[10px]"
+                      : "text-muted-foreground text-[10px]"
+                  }
+                >
+                  {isRunning && (
+                    <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse mr-1.5" />
+                  )}
+                  {stage === "idle"
+                    ? "Ready"
+                    : stage === "complete"
+                    ? "Complete"
+                    : "Agent Running"}
+                </Badge>
               </div>
             </div>
-          </div>
+          </header>
+
+          {/* Main Content */}
+          <main className="flex-1 max-w-[1600px] mx-auto w-full px-4 lg:px-6 py-6">
+            <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr_320px] gap-6 h-[calc(100vh-110px)]">
+              {/* Left Panel */}
+              <div className="flex flex-col gap-4 overflow-y-auto">
+                <div className="rounded-xl border border-border/50 bg-card/95 shadow-sm p-4">
+                  <h2 className="text-xs font-medium uppercase tracking-wider text-muted-foreground mb-3">
+                    Request for Quote
+                  </h2>
+                  <RFQForm rfq={rfq} onChange={setRfq} disabled={isRunning} />
+                </div>
+
+                <div className="rounded-xl border border-border/50 bg-card/95 shadow-sm p-4">
+                  <h2 className="text-xs font-medium uppercase tracking-wider text-muted-foreground mb-3">
+                    Agent Actions
+                  </h2>
+                  <div className="flex flex-col gap-2">
+                    {ACTION_BUTTONS.map((btn) => {
+                      const Icon = btn.icon
+                      const isActiveAction = btn.stage === stage
+                      const btnIndex = STAGE_INDEX[btn.stage]
+                      const isDone = currentIndex > btnIndex
+
+                      return (
+                        <Button
+                          key={btn.stage}
+                          variant="outline"
+                          size="sm"
+                          disabled
+                          className={
+                            isActiveAction
+                              ? "justify-start gap-2 border-primary/30 bg-primary/10 text-primary opacity-100 h-9"
+                              : isDone
+                              ? "justify-start gap-2 border-primary/20 bg-primary/5 text-primary/70 opacity-100 h-9"
+                              : "justify-start gap-2 text-muted-foreground h-9"
+                          }
+                        >
+                          <Icon className="h-4 w-4" />
+                          {btn.label}
+                          {isActiveAction && (
+                            <span className="ml-auto flex gap-1">
+                              <span className="w-1 h-1 rounded-full bg-primary animate-pulse" />
+                              <span className="w-1 h-1 rounded-full bg-primary animate-pulse [animation-delay:200ms]" />
+                              <span className="w-1 h-1 rounded-full bg-primary animate-pulse [animation-delay:400ms]" />
+                            </span>
+                          )}
+                          {isDone && !isActiveAction && (
+                            <span className="ml-auto text-[10px] text-primary/60">
+                              Done
+                            </span>
+                          )}
+                        </Button>
+                      )
+                    })}
+                  </div>
+                </div>
+              </div>
+
+              {/* Center Panel */}
+              <div className="flex flex-col gap-4 min-h-0">
+                {calls.length > 0 && <PhoneCallPanel calls={calls} />}
+                {summary && <SummaryPanel summary={summary} />}
+
+                <div className="flex-1 rounded-xl border border-border/50 bg-card/95 shadow-sm p-4 min-h-0 flex flex-col">
+                  <div className="flex items-center justify-between mb-3">
+                    <h2 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                      Agent Activity
+                    </h2>
+                    {activities.length > 0 && (
+                      <span className="text-[10px] font-mono text-muted-foreground/60">
+                        {activities.length} actions
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex-1 min-h-0">
+                    <ActivityFeed activities={activities} />
+                  </div>
+                </div>
+              </div>
+
+              {/* Right Panel */}
+              <div className="flex flex-col gap-4 overflow-y-auto">
+                {quotes.length > 0 && (
+                  <div className="rounded-xl border border-border/50 bg-card/95 shadow-sm p-4">
+                    <QuotesPanel quotes={quotes} />
+                  </div>
+                )}
+
+                {quotes.length === 0 && stage !== "idle" && (
+                  <div className="rounded-xl border border-border/50 bg-card/95 shadow-sm p-4 flex items-center justify-center min-h-[200px]">
+                    <div className="text-center text-muted-foreground/50">
+                      <p className="text-sm">Awaiting quotes...</p>
+                      <p className="text-xs mt-1">
+                        Quotes will appear here as they arrive
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Connected Services */}
+                <div className="rounded-xl border border-border/50 bg-card/95 shadow-sm p-4">
+                  <h2 className="text-xs font-medium uppercase tracking-wider text-muted-foreground mb-3">
+                    Connected Services
+                  </h2>
+                  <div className="flex flex-col gap-0.5">
+                        <ServiceItem
+                      label="Perplexity Sonar"
+                      description="Market intelligence & citations"
+                      active={activeServices.perplexity}
+                      wasActive={everActive.perplexity}
+                    />
+                    <ServiceItem
+                      label="Browserbase Stagehand"
+                      description="Web actions, form fill, extract"
+                      active={activeServices.stagehand}
+                      wasActive={everActive.stagehand}
+                    />
+                    <ServiceItem
+                      label="ElevenLabs Voice Agent"
+                      description="Real-time voice calls & STT"
+                      active={activeServices.elevenlabs}
+                      wasActive={everActive.elevenlabs}
+                    />
+                    <ServiceItem
+                      label="Elasticsearch"
+                      description="Hybrid memory retrieval (RRF)"
+                      active={activeServices.elasticsearch}
+                      wasActive={everActive.elasticsearch}
+                    />
+                    <ServiceItem
+                      label="Negotiating"
+                      description="Extraction & negotiation strategy"
+                      active={activeServices.openai}
+                      wasActive={everActive.openai}
+                    />
+                    <ServiceItem
+                      label="Visa B2B + Coinbase"
+                      description="USDC stablecoin payment on Base"
+                      active={activeServices.payment}
+                      wasActive={everActive.payment}
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+          </main>
         </div>
-      </main>
+      )}
+
+      {/* Chat overlay - fades out slowly when transitioning */}
+      {showChat && (
+        <div
+          className={cn(
+            "fixed inset-0 z-20 flex items-center justify-center min-h-screen transition-opacity duration-[1200ms] ease-out",
+            view === "transitioning" && "opacity-0 pointer-events-none"
+          )}
+        >
+          <RequirementsChat onComplete={handleChatComplete} />
+        </div>
+      )}
     </div>
   )
 }
@@ -457,8 +483,8 @@ function ServiceItem({ label, description, active, wasActive }) {
   return (
     <div
       className={cn(
-        "flex items-center gap-3 py-2 px-2 rounded-md transition-all duration-500",
-        active && "bg-primary/[0.07]",
+        "flex items-center gap-3 py-2 px-2 rounded-lg transition-all duration-300",
+        active && "bg-primary/[0.08]",
       )}
     >
       <div className="relative shrink-0">

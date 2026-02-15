@@ -13,7 +13,7 @@ export function SummaryPanel({ summary }) {
   if (!summary) return null
 
   return (
-    <div className="rounded-lg border border-primary/30 bg-primary/5 p-5">
+    <div className="rounded-xl border border-primary/25 bg-primary/5 shadow-sm p-5">
       <div className="flex items-center gap-2 mb-4">
         <CheckCircle2 className="h-5 w-5 text-primary" />
         <h3 className="text-base font-semibold text-foreground">
@@ -25,7 +25,7 @@ export function SummaryPanel({ summary }) {
       </div>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
-        <div className="flex flex-col gap-1 bg-card/60 rounded-md p-3 border border-border/50">
+        <div className="flex flex-col gap-1 bg-card/70 rounded-lg p-3 border border-border/40">
           <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
             Suppliers Found
           </span>
@@ -33,7 +33,7 @@ export function SummaryPanel({ summary }) {
             {summary.suppliersFound}
           </span>
         </div>
-        <div className="flex flex-col gap-1 bg-card/60 rounded-md p-3 border border-border/50">
+        <div className="flex flex-col gap-1 bg-card/70 rounded-lg p-3 border border-border/40">
           <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
             Quotes Received
           </span>
@@ -41,7 +41,7 @@ export function SummaryPanel({ summary }) {
             {summary.quotesReceived}
           </span>
         </div>
-        <div className="flex flex-col gap-1 bg-card/60 rounded-md p-3 border border-border/50">
+        <div className="flex flex-col gap-1 bg-card/70 rounded-lg p-3 border border-border/40">
           <span className="text-[10px] uppercase tracking-wider text-muted-foreground flex items-center gap-1">
             <TrendingDown className="h-3 w-3" />
             Best Price
@@ -50,7 +50,7 @@ export function SummaryPanel({ summary }) {
             {summary.bestPrice}
           </span>
         </div>
-        <div className="flex flex-col gap-1 bg-card/60 rounded-md p-3 border border-border/50">
+        <div className="flex flex-col gap-1 bg-card/70 rounded-lg p-3 border border-border/40">
           <span className="text-[10px] uppercase tracking-wider text-muted-foreground flex items-center gap-1">
             <TrendingDown className="h-3 w-3" />
             Savings
@@ -86,7 +86,7 @@ export function SummaryPanel({ summary }) {
         </div>
       </div>
 
-      <div className="bg-card/60 rounded-md border border-border/50 p-3 mb-4">
+      <div className="bg-card/70 rounded-lg border border-border/40 p-3 mb-4">
         <span className="text-xs text-muted-foreground block mb-1">
           Recommendation
         </span>

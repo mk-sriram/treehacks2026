@@ -170,7 +170,7 @@ ${input.allCompetingOffers || 'No other quotes available.'}
 BEST COMPETING PRICE: ${input.bestPrice}/unit from ${input.bestSupplier}
 
 INSTRUCTIONS:
-Create a negotiation strategy for a follow-up call with this vendor. The goal is to get a lower price, ideally matching or beating the best competing offer. Consider the vendor's strengths, weaknesses, and any leverage points from their background or the competitive landscape.
+Create a negotiation strategy for a follow-up call with this vendor. The goal is to get a LOWER price (lower numeric value = better for us; e.g. $4 is better than $4.35). Ideally match or beat the best competing offer (${input.bestPrice}). Push for a target below best when possible. Consider the vendor's strengths, weaknesses, and any leverage points from their background or the competitive landscape.
 
 Output ONLY valid JSON with this structure:
 {
