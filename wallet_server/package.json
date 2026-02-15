@@ -1,0 +1,18 @@
+{
+  "name": "wallet-server",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Mock B2B vendor invoice server with AgentMail email integration",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "dotenv": "^17.3.1",
+    "express": "^5.1.0"
+  }
+}
