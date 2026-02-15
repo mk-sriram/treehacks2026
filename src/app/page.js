@@ -67,7 +67,7 @@ export default function ProcurementAgent() {
   const [dashboardReady, setDashboardReady] = useState(false)
   const cleanupRef = useRef(null)
 
-  const isRunning = stage !== "idle" && stage !== "complete"
+  const isRunning = stage !== "idle" && stage !== "complete" && stage !== "invoice_received"
 
   const handleChatComplete = useCallback((parsedRfq) => {
     setRfq(parsedRfq)
@@ -128,6 +128,14 @@ export default function ProcurementAgent() {
               break
             case 'services_change':
               setActiveServices(event.payload)
+              break
+            case 'email_sent':
+              // Confirmation email was sent to winning vendor
+              console.log('Email sent to vendor:', event.payload.vendorName, event.payload.vendorEmail)
+              break
+            case 'invoice_received':
+              // Vendor replied with an invoice
+              console.log('Invoice received from:', event.payload.vendorName)
               break
           }
         } catch (err) {

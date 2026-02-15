@@ -18,6 +18,7 @@ import {
   Loader2,
   AlertCircle,
   GitBranch,
+  Mail,
 } from "lucide-react"
 
 const TYPE_CONFIG = {
@@ -65,6 +66,11 @@ const TYPE_CONFIG = {
     icon: Cpu,
     color: "text-muted-foreground",
     badgeColor: "bg-muted text-muted-foreground border-border",
+  },
+  email: {
+    icon: Mail,
+    color: "text-[hsl(330,65%,55%)]",
+    badgeColor: "bg-[hsl(330,65%,55%)]/10 text-[hsl(330,65%,55%)] border-[hsl(330,65%,55%)]/20",
   },
 }
 

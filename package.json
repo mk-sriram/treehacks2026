@@ -15,6 +15,7 @@
     "@neondatabase/serverless": "^1.0.2",
     "@prisma/adapter-neon": "^7.4.0",
     "@prisma/client": "^7.4.0",
+    "agentmail": "^0.2.15",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",

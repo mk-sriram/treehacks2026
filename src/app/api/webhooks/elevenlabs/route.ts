@@ -11,6 +11,7 @@ import { emitRunEvent } from '@/lib/events';
 import { triggerOutboundCall, buildDynamicVariables, resolveDialNumber } from '@/lib/elevenlabs';
 import { assembleOutreachContext } from '@/lib/outreach';
 import { generateNegotiationStrategy, retrieveVendorIntelligence, formatStrategyForAgent, type NegotiationStrategyInput } from '@/lib/negotiation';
+import { resolveWinner, triggerConfirmationCall, sendConfirmationEmailToWinner } from '@/lib/finalize';
 
 let webhookActivityCounter = 0;
 function makeActivityId() {
@@ -452,6 +453,20 @@ async function checkRoundCompletion(runId: string, round: number) {
         finalizeSummary(runId).catch(err =>
             console.error(`[WEBHOOK] finalizeSummary error:`, err)
         );
+    } else if (round === 3) {
+        // CAS: only transition if status is still 'calling_round_3'
+        const updated = await prisma.run.updateMany({
+            where: { id: runId, status: 'calling_round_3' },
+            data: { status: 'sending_confirmation' },
+        });
+        if (updated.count === 0) {
+            console.log(`[WEBHOOK] CAS miss — run ${runId} already advanced past calling_round_3`);
+            return;
+        }
+        console.log(`[WEBHOOK] Round 3 confirmation call complete — sending email`);
+        sendConfirmationAfterCall(runId).catch(err =>
+            console.error(`[WEBHOOK] sendConfirmationAfterCall error:`, err)
+        );
     }
 }
 
@@ -684,34 +699,23 @@ async function startNegotiationRound(runId: string) {
 
 /**
  * After all calls are done (round 2 or skipped negotiation),
- * compute final stats and emit summary to the frontend.
+ * resolve winner, emit summary, trigger round 3 call, then email.
+ * Uses shared logic from @/lib/finalize.
  */
 async function finalizeSummary(runId: string) {
     console.log(`[WEBHOOK] ========== Finalizing Summary ==========`);
 
-    const totalOffers = await prisma.offer.count({ where: { vendor: { runId } } });
-    const allOffers = await prisma.offer.findMany({
-        where: { vendor: { runId } },
-        include: { vendor: true },
-        orderBy: { unitPrice: 'asc' },
-    });
+    const { winner, allFinal, totalOffers, vendorCount, savingsText } = await resolveWinner(runId);
 
-    const bestOffer = allOffers.find(o => o.unitPrice != null);
-    const vendorCount = new Set(allOffers.map(o => o.vendorId)).size;
-
-    // Compute savings if we have both R1 and R2 offers from same vendor
-    let savingsText = '';
-    const r1Offers = allOffers.filter(o => o.source === 'voice-call-r1');
-    const r2Offers = allOffers.filter(o => o.source === 'voice-call-r2');
-    if (r1Offers.length > 0 && r2Offers.length > 0) {
-        const r1Best = r1Offers[0]?.unitPrice ?? 0;
-        const r2Best = r2Offers[0]?.unitPrice ?? 0;
-        if (r1Best > 0 && r2Best > 0 && r2Best < r1Best) {
-            const savings = ((r1Best - r2Best) / r1Best * 100).toFixed(1);
-            savingsText = ` Negotiation saved ${savings}% ($${r1Best} → $${r2Best}).`;
-        }
+    console.log(`[WEBHOOK] Final offers resolved for ${allFinal.length} vendors:`);
+    for (const fo of allFinal) {
+        console.log(`[WEBHOOK]   ${fo.vendorName}: $${fo.finalPrice ?? 'N/A'}/unit ${fo.wasNegotiated ? `(negotiated from $${fo.originalPrice}, saved ${fo.savingsPercent ?? 0}%)` : '(initial quote)'}`);
+    }
+    if (winner) {
+        console.log(`[WEBHOOK] Winner: ${winner.vendorName} at $${winner.finalPrice}/unit`);
     }
 
+    // ─── Emit frontend events ────────────────────────────────────────
     emitRunEvent(runId, {
         type: 'services_change',
         payload: { perplexity: false, elasticsearch: false, gemini: false, stagehand: false, elevenlabs: false, visa: false },
@@ -724,31 +728,90 @@ async function finalizeSummary(runId: string) {
             id: makeActivityId(),
             type: 'system',
             title: 'Procurement Complete',
-            description: `${vendorCount} vendors contacted, ${totalOffers} total quotes.${bestOffer ? ` Best: $${bestOffer.unitPrice}/unit from ${bestOffer.vendor.name}.` : ''}${savingsText}`,
+            description: `${vendorCount} vendors contacted, ${totalOffers} total quotes.${winner ? ` Best: $${winner.finalPrice}/unit from ${winner.vendorName}${winner.wasNegotiated ? ' (negotiated)' : ''}.` : ''}${savingsText}`,
             timestamp: new Date(),
             status: 'done',
             tool: 'orchestrator',
         },
     });
 
+    const vendorComparison = allFinal
+        .filter(o => o.finalPrice != null)
+        .map(o => ({
+            supplier: o.vendorName,
+            finalPrice: `$${o.finalPrice}`,
+            originalPrice: o.originalPrice != null ? `$${o.originalPrice}` : null,
+            negotiated: o.wasNegotiated,
+            savings: o.savingsPercent != null ? `${o.savingsPercent}%` : null,
+            leadTime: o.finalOffer.leadTimeDays != null ? `${o.finalOffer.leadTimeDays} days` : 'N/A',
+            terms: o.finalOffer.terms ?? 'N/A',
+            isWinner: o.vendorId === winner?.vendorId,
+        }));
+
     emitRunEvent(runId, {
         type: 'summary',
         payload: {
             suppliersFound: vendorCount,
             quotesReceived: totalOffers,
-            bestPrice: bestOffer?.unitPrice != null ? `$${bestOffer.unitPrice}` : 'N/A',
-            bestSupplier: bestOffer?.vendor?.name ?? 'N/A',
+            bestPrice: winner?.finalPrice != null ? `$${winner.finalPrice}` : 'N/A',
+            bestSupplier: winner?.vendorName ?? 'N/A',
+            negotiated: winner?.wasNegotiated ?? false,
+            originalPrice: winner?.originalPrice != null ? `$${winner.originalPrice}` : null,
+            savingsPercent: winner?.savingsPercent != null ? `${winner.savingsPercent}%` : null,
             avgLeadTime: 'N/A',
-            recommendation: bestOffer
-                ? `Best price: $${bestOffer.unitPrice}/unit from ${bestOffer.vendor.name}.${savingsText} Ready to proceed with purchase.`
+            vendorComparison,
+            recommendation: winner
+                ? `Best price: $${winner.finalPrice}/unit from ${winner.vendorName}${winner.wasNegotiated ? ` (negotiated down from $${winner.originalPrice})` : ''}.${savingsText} Ready to proceed with purchase.`
                 : `${vendorCount} vendors contacted but no firm quotes extracted. Review call transcripts.`,
             nextSteps: [
                 'Review all quotes in the quotes panel',
-                'Select winning vendor and proceed to purchase order',
+                winner?.vendorEmail
+                    ? 'Confirmation call + email to winning vendor in progress'
+                    : 'Contact winning vendor to finalize purchase order',
             ],
         },
     });
 
-    await prisma.run.update({ where: { id: runId }, data: { status: 'complete' } });
-    console.log(`[WEBHOOK] Run ${runId} COMPLETE — ${totalOffers} offers, best: $${bestOffer?.unitPrice ?? 'N/A'}`);
+    // ─── Round 3: Confirmation call → then email ─────────────────────
+    if (winner && winner.finalPrice != null) {
+        const callPlaced = await triggerConfirmationCall(runId, winner);
+        if (!callPlaced) {
+            // Call was skipped or failed — send email directly
+            console.log(`[WEBHOOK] Confirmation call skipped — sending email directly`);
+            await prisma.run.update({ where: { id: runId }, data: { status: 'sending_confirmation' } });
+            await sendConfirmationEmailToWinner(runId);
+        }
+        // If call placed, webhook handles round 3 → sendConfirmationAfterCall
+    } else {
+        await prisma.run.update({ where: { id: runId }, data: { status: 'complete' } });
+        console.log(`[WEBHOOK] Run ${runId} COMPLETE — no winning offer found`);
+    }
+}
+
+/**
+ * Called after round 3 confirmation call completes (via webhook checkRoundCompletion).
+ * Emits a "call completed" activity, then sends the confirmation email.
+ */
+async function sendConfirmationAfterCall(runId: string) {
+    console.log(`[WEBHOOK] ========== Post-Confirmation Call: Sending Email ==========`);
+
+    emitRunEvent(runId, {
+        type: 'activity',
+        payload: {
+            id: makeActivityId(),
+            type: 'call',
+            title: 'Confirmation call completed',
+            description: 'Deal confirmed verbally. Now sending written confirmation via email.',
+            timestamp: new Date(),
+            status: 'done',
+            tool: 'elevenlabs',
+        },
+    });
+
+    emitRunEvent(runId, {
+        type: 'services_change',
+        payload: { perplexity: false, elasticsearch: false, gemini: false, stagehand: false, elevenlabs: false, visa: false },
+    });
+
+    await sendConfirmationEmailToWinner(runId);
 }
