@@ -46,7 +46,7 @@ export async function POST(
         const ctx = await assembleOutreachContext(runId, vendorId);
 
         // 4. Resolve phone number (may be overridden for testing)
-        const { dialNumber, isOverridden } = resolveDialNumber(vendor.phone);
+        const { dialNumber, isOverridden } = resolveDialNumber(vendor.phone, vendorId);
         if (isOverridden) {
             console.log(`[API /call] ⚠️ TEST MODE: Calling ${dialNumber} instead of ${vendor.phone}`);
         }

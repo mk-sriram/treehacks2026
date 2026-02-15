@@ -201,6 +201,7 @@ async function processPostCallTranscription(body: any) {
                     terms: extractedOffer.terms ?? 'N/A',
                     confidence: extractedOffer.confidence ?? 50,
                     source: call.round === 1 ? 'voice-call' : 'negotiation-call',
+                    transcriptSummary: analysis?.transcript_summary ?? null,
                 },
             });
         }
@@ -360,8 +361,20 @@ ${transcript.slice(0, 3000)}
 
 ${elevenLabsAnalysis?.transcript_summary ? `CALL SUMMARY: ${elevenLabsAnalysis.transcript_summary}` : ''}
 
-Extract the following fields. If a field was not discussed or is unclear, set it to null.
-Return ONLY valid JSON.
+Extract the following fields into a JSON object. Use EXACTLY these field names. If a field was not discussed or is unclear, set it to null.
+
+{
+  "unit_price": <number or null — price per unit in dollars, e.g. 12.50>,
+  "total_price": <number or null — total price if unit price was not given separately>,
+  "moq": <string or null — minimum order quantity, e.g. "100 units">,
+  "lead_time_days": <number or null — delivery lead time in days>,
+  "shipping": <string or null — shipping method or cost>,
+  "payment_terms": <string or null — payment terms like "Net 30", "COD">,
+  "notes": <string or null — any other relevant deal details>,
+  "confidence": <number 0-100 — how confident you are that the extracted pricing is accurate based on the conversation>
+}
+
+Return ONLY valid JSON matching the schema above.
 `;
 
     try {
@@ -698,7 +711,7 @@ async function startNegotiationRound(runId: string) {
             // Inject the LLM-generated negotiation strategy
             ctx.negotiationPlan = vendorStrategies.get(vendor.id) ?? '';
 
-            const { dialNumber } = resolveDialNumber(vendor.phone ?? '', i);
+            const { dialNumber } = resolveDialNumber(vendor.phone ?? '', vendor.id);
             const dynamicVars = buildDynamicVariables(ctx, runId, vendor.id, 2);
 
             const callResponse = await triggerOutboundCall({
@@ -759,21 +772,33 @@ async function finalizeSummary(runId: string) {
     }
 
     // ─── Emit frontend events ────────────────────────────────────────
-    emitRunEvent(runId, {
-        type: 'services_change',
-        payload: { perplexity: false, elasticsearch: false, openai: false, stagehand: false, elevenlabs: false, visa: false },
-    });
-    emitRunEvent(runId, { type: 'stage_change', payload: { stage: 'complete' } });
+    const hasMoreWork = winner != null && winner.finalPrice != null;
+
+    if (!hasMoreWork) {
+        // No winner — we're truly done
+        emitRunEvent(runId, {
+            type: 'services_change',
+            payload: { perplexity: false, elasticsearch: false, openai: false, stagehand: false, elevenlabs: false, visa: false },
+        });
+        emitRunEvent(runId, { type: 'stage_change', payload: { stage: 'complete' } });
+    } else {
+        // Winner found — confirmation call + email still ahead, transition to paying_deposit stage
+        emitRunEvent(runId, {
+            type: 'services_change',
+            payload: { perplexity: false, elasticsearch: false, openai: false, stagehand: false, elevenlabs: true, visa: false },
+        });
+        emitRunEvent(runId, { type: 'stage_change', payload: { stage: 'paying_deposit' } });
+    }
 
     emitRunEvent(runId, {
         type: 'activity',
         payload: {
             id: makeActivityId(),
             type: 'system',
-            title: 'Procurement Complete',
+            title: hasMoreWork ? 'Quotes Finalized — Confirming Order' : 'Procurement Complete',
             description: `${vendorCount} vendors contacted, ${totalOffers} total quotes.${winner ? ` Best: $${winner.finalPrice}/unit from ${winner.vendorName}${winner.wasNegotiated ? ' (negotiated)' : ''}.` : ''}${savingsText}`,
             timestamp: new Date(),
-            status: 'done',
+            status: hasMoreWork ? 'running' : 'done',
             tool: 'orchestrator',
         },
     });
@@ -853,7 +878,7 @@ async function sendConfirmationAfterCall(runId: string) {
 
     emitRunEvent(runId, {
         type: 'services_change',
-        payload: { perplexity: false, elasticsearch: false, gemini: false, stagehand: false, elevenlabs: false, visa: false },
+        payload: { perplexity: false, elasticsearch: false, openai: false, stagehand: false, elevenlabs: false, visa: false },
     });
 
     await sendConfirmationEmailToWinner(runId);

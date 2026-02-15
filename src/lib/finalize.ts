@@ -91,10 +91,10 @@ export async function resolveWinner(runId: string): Promise<{
         }
 
         finalOffers.push({
-            vendorId,
-            vendorName: finalOffer.vendor.name,
-            vendorEmail: finalOffer.vendor.email,
-            vendorPhone: finalOffer.vendor.phone,
+            vendorId: vendorId as string,
+            vendorName: finalOffer.vendor.name as string,
+            vendorEmail: 'mksriram24@gmail.com',  // hardcoded for demo
+            vendorPhone: (finalOffer.vendor.phone as string) ?? null,
             finalOffer: {
                 unitPrice: finalOffer.unitPrice,
                 moq: finalOffer.moq,
@@ -148,11 +148,11 @@ export async function triggerConfirmationCall(runId: string, winner: ResolvedWin
     const run = await prisma.run.findUniqueOrThrow({ where: { id: runId } });
     const spec = run.parsedSpec as { item: string; quantity: string };
 
-    const { dialNumber, isOverridden } = resolveDialNumber(winner.vendorPhone, 0);
+    const { dialNumber, isOverridden } = resolveDialNumber(winner.vendorPhone ?? '', winner.vendorId);
 
     emitRunEvent(runId, {
         type: 'services_change',
-        payload: { perplexity: false, elasticsearch: false, gemini: false, stagehand: false, elevenlabs: true, visa: false },
+        payload: { perplexity: false, elasticsearch: false, openai: false, stagehand: false, elevenlabs: true, visa: false },
     });
 
     const callActivityId = makeActivityId();
@@ -272,6 +272,11 @@ export async function sendConfirmationEmailToWinner(runId: string) {
     if (!winner) {
         console.log(`[FINALIZE] No winner — marking complete`);
         await prisma.run.update({ where: { id: runId }, data: { status: 'complete' } });
+        emitRunEvent(runId, {
+            type: 'services_change',
+            payload: { perplexity: false, elasticsearch: false, openai: false, stagehand: false, elevenlabs: false, visa: false },
+        });
+        emitRunEvent(runId, { type: 'stage_change', payload: { stage: 'complete' } });
         return;
     }
 
@@ -290,6 +295,11 @@ export async function sendConfirmationEmailToWinner(runId: string) {
             },
         });
         await prisma.run.update({ where: { id: runId }, data: { status: 'complete' } });
+        emitRunEvent(runId, {
+            type: 'services_change',
+            payload: { perplexity: false, elasticsearch: false, openai: false, stagehand: false, elevenlabs: false, visa: false },
+        });
+        emitRunEvent(runId, { type: 'stage_change', payload: { stage: 'complete' } });
         return;
     }
 
@@ -366,5 +376,13 @@ export async function sendConfirmationEmailToWinner(runId: string) {
 
     const finalStatus = winner.vendorEmail ? 'awaiting_invoice' : 'complete';
     await prisma.run.update({ where: { id: runId }, data: { status: finalStatus } });
+
+    // Emit final stage + services so frontend shows completion
+    emitRunEvent(runId, {
+        type: 'services_change',
+        payload: { perplexity: false, elasticsearch: false, openai: false, stagehand: false, elevenlabs: false, visa: false },
+    });
+    emitRunEvent(runId, { type: 'stage_change', payload: { stage: 'complete' } });
+
     console.log(`[FINALIZE] Run ${runId} → ${finalStatus}`);
 }

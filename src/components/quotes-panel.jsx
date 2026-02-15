@@ -2,16 +2,22 @@
 
 import { cn } from "@/lib/utils"
 import { Badge } from "@/components/ui/badge"
-import { Phone, Globe, FileSearch } from "lucide-react"
+import { Phone, Globe, FileSearch, Handshake } from "lucide-react"
 
 const SOURCE_ICONS = {
   "voice-call": Phone,
+  "voice-call-r1": Phone,
+  "voice-call-r2": Handshake,
+  "negotiation-call": Handshake,
   "web-form": Globe,
   "web-scrape": FileSearch,
 }
 
 const SOURCE_LABELS = {
   "voice-call": "Voice Call",
+  "voice-call-r1": "Initial Quote Call",
+  "voice-call-r2": "Negotiation Call",
+  "negotiation-call": "Negotiation Call",
   "web-form": "Web Form",
   "web-scrape": "Web Scrape",
 }
@@ -104,6 +110,14 @@ export function QuotesPanel({ quotes }) {
                   {quote.confidence}% conf
                 </span>
               </div>
+
+              {quote.transcriptSummary && (
+                <div className="mt-2 pt-2 border-t border-border/30">
+                  <p className="text-[11px] text-muted-foreground/70 leading-relaxed line-clamp-3">
+                    {quote.transcriptSummary}
+                  </p>
+                </div>
+              )}
             </div>
           )
         })}

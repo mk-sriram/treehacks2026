@@ -130,24 +130,40 @@ export function buildDynamicVariables(
 }
 
 /**
- * Resolve the phone number to dial.
- * If ELEVENLABS_TEST_PHONE_OVERRIDE is set (comma-separated list of phone numbers),
- * calls are round-robined across the list. With a batch size of 3 and 3 test phones,
- * each concurrent call goes to a different test number.
+ * Return the list of test phone numbers from the ELEVENLABS_TEST_PHONE_OVERRIDE
+ * env var (comma-separated CSV), or null if not set.
+ *
+ * These are assigned 1:1 to vendors at discovery time and stored in Postgres
+ * (vendor.phone), so the association is persistent across all rounds.
  *
  * .env.local example:
  *   ELEVENLABS_TEST_PHONE_OVERRIDE=+14155551111,+14155552222,+14155553333
  */
-export function resolveDialNumber(vendorPhone: string, vendorIndex: number = 0): {
+export function getTestPhoneNumbers(): string[] | null {
+    const override = process.env.ELEVENLABS_TEST_PHONE_OVERRIDE;
+    if (!override) return null;
+    const phones = override.split(',').map(p => p.trim()).filter(Boolean);
+    return phones.length > 0 ? phones : null;
+}
+
+/**
+ * Resolve the phone number to dial.
+ *
+ * Phone numbers are now pre-assigned to vendors at discovery time and stored
+ * in Postgres (vendor.phone). This function is a passthrough — it returns
+ * whatever phone is stored on the vendor record.
+ *
+ * The isOverridden flag indicates whether test phone override is active
+ * (for logging/UI purposes), but does NOT change the number — the correct
+ * test phone was already written to vendor.phone by the orchestrator.
+ */
+export function resolveDialNumber(vendorPhone: string, vendorId: string = ''): {
     dialNumber: string;
     isOverridden: boolean;
 } {
-    const override = process.env.ELEVENLABS_TEST_PHONE_OVERRIDE;
-    if (override) {
-        const phones = override.split(',').map(p => p.trim()).filter(Boolean);
-        const picked = phones[vendorIndex % phones.length];
-        console.log(`[ELEVENLABS] ⚠️  Phone override active — dialing ${picked} instead of ${vendorPhone} (index ${vendorIndex}, pool size ${phones.length})`);
-        return { dialNumber: picked, isOverridden: true };
+    const isTestMode = !!process.env.ELEVENLABS_TEST_PHONE_OVERRIDE;
+    if (isTestMode) {
+        console.log(`[ELEVENLABS] Test mode active — dialing pre-assigned phone ${vendorPhone} for vendorId=${vendorId}`);
     }
-    return { dialNumber: vendorPhone, isOverridden: false };
+    return { dialNumber: vendorPhone, isOverridden: isTestMode };
 }

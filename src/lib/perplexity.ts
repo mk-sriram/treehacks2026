@@ -35,7 +35,7 @@ Vice versa for email. If there is a form or some other contact method on the web
 
 CRITICAL: We will be calling these vendors by phone. Finding accurate phone numbers is the highest priority. Check their website "Contact Us" page, footer, Google Business listing, or directory listings. A vendor without a phone number is much less useful to us.
 
-Return ONLY a JSON array (no markdown, no prose, no explanation) with 8-15 vendors. Each element must have these exact fields:
+Return ONLY a JSON array (no markdown, no prose, no explanation) with 3-5 vendors (focus on the BEST matches only). Each element must have these exact fields:
 {
   "name": "Vendor Name",
   "url": "https://vendor-website.com",

@@ -11,7 +11,7 @@ import { prisma } from './db';
 import { emitRunEvent } from './events';
 import { runDiscoveryLoop, type VendorCandidate } from './perplexity';
 import { writeMemory } from './elastic';
-import { triggerOutboundCall, buildDynamicVariables, resolveDialNumber } from './elevenlabs';
+import { triggerOutboundCall, buildDynamicVariables, resolveDialNumber, getTestPhoneNumbers } from './elevenlabs';
 import { assembleOutreachContext } from './outreach';
 
 let activityCounter = 0;
@@ -83,10 +83,20 @@ export async function runOrchestrator(runId: string) {
 
         console.log(`[ORCHESTRATOR] Discovery loop complete — ${deduped.length} unique vendors (${totalVendorsFound} total before dedup)`);
 
-        // Store deduped vendors in PG
-        console.log(`[ORCHESTRATOR] Storing ${deduped.length} vendors in Postgres...`);
+        // ===== LIMIT TO TOP 3 VENDORS =====
+        // Prioritize vendors that have phone numbers (needed for calls),
+        // then take the first 3. This keeps the pipeline focused and ensures
+        // the UI shows exactly 3 companies.
+        const MAX_VENDORS = 3;
+        const withPhones = deduped.filter(v => v.phone);
+        const withoutPhones = deduped.filter(v => !v.phone);
+        const topVendors = [...withPhones, ...withoutPhones].slice(0, MAX_VENDORS);
+        console.log(`[ORCHESTRATOR] Limited to top ${topVendors.length} vendors (from ${deduped.length} deduped): ${topVendors.map(v => v.name).join(', ')}`);
+
+        // Store top vendors in PG
+        console.log(`[ORCHESTRATOR] Storing ${topVendors.length} vendors in Postgres...`);
         const createdVendors = [];
-        for (const v of deduped) {
+        for (const v of topVendors) {
             const vendor = await prisma.vendor.create({
                 data: {
                     runId,
@@ -152,7 +162,32 @@ export async function runOrchestrator(runId: string) {
             });
         }
 
-        // Emit summary activity for discovery -- categorize vendors by contact method
+        // ===== ASSIGN TEST PHONE NUMBERS (if override is set) =====
+        // When ELEVENLABS_TEST_PHONE_OVERRIDE is set (CSV of phone numbers),
+        // assign them 1:1 to vendors and persist in Postgres. This ensures
+        // the same vendor always calls the same test phone across all rounds
+        // (round 1 quote, round 2 negotiation, round 3 confirmation).
+        const testPhones = getTestPhoneNumbers();
+        if (testPhones && testPhones.length > 0) {
+            console.log(`[ORCHESTRATOR] Test phone override active — assigning ${testPhones.length} phones to ${createdVendors.length} vendors`);
+            for (let i = 0; i < createdVendors.length && i < testPhones.length; i++) {
+                const vendor = createdVendors[i];
+                const assignedPhone = testPhones[i];
+                const originalPhone = vendor.phone;
+
+                await prisma.vendor.update({
+                    where: { id: vendor.id },
+                    data: { phone: assignedPhone },
+                });
+
+                // Update the in-memory object too so downstream code sees the correct phone
+                createdVendors[i] = { ...vendor, phone: assignedPhone };
+
+                console.log(`[ORCHESTRATOR] Assigned test phone ${assignedPhone} to ${vendor.name} (original: ${originalPhone ?? 'none'}) — stored in Postgres`);
+            }
+        }
+
+        // Categorize vendors by contact method
         const vendorsWithPhone = createdVendors.filter((v) => v.phone);
         const vendorsWithEmail = createdVendors.filter((v) => v.email && !v.phone);
         const vendorsWithFormOnly = createdVendors.filter((v) => !v.phone && !v.email);
@@ -164,7 +199,7 @@ export async function runOrchestrator(runId: string) {
                 id: discoveryAnalysisId,
                 type: 'analyze',
                 title: 'Vendor Discovery Complete',
-                description: `Found ${deduped.length} unique vendors across ${angleLabels.length} search angles. ${vendorsWithPhone.length} have phone numbers (ready for calls), ${vendorsWithEmail.length} email-only, ${vendorsWithFormOnly.length} web form only.`,
+                description: `Selected top ${topVendors.length} vendors from ${deduped.length} candidates. ${vendorsWithPhone.length} have phone numbers (ready for calls), ${vendorsWithEmail.length} email-only, ${vendorsWithFormOnly.length} web form only.${testPhones ? ' Test phone numbers assigned.' : ''}`,
                 timestamp: new Date(),
                 status: 'done',
                 tool: 'perplexity-sonar',
@@ -231,9 +266,9 @@ export async function runOrchestrator(runId: string) {
             } else {
                 const callResults: Array<{ vendorName: string; callId: string; conversationId: string; success: boolean; error?: string }> = [];
 
-                // Limit to top 3 vendors for testing
-                const vendorsToCall = vendorsWithPhone.slice(0, 3);
-                console.log(`[ORCHESTRATOR] Calling ${vendorsToCall.length} vendors (of ${vendorsWithPhone.length} total)...`);
+                // All vendors with phone numbers are already limited to 3 from discovery
+                const vendorsToCall = vendorsWithPhone;
+                console.log(`[ORCHESTRATOR] Calling ${vendorsToCall.length} vendors...`);
 
                 // Set status BEFORE firing calls to prevent race condition:
                 // If a call completes quickly, the webhook's checkRoundCompletion
@@ -277,7 +312,7 @@ export async function runOrchestrator(runId: string) {
                         console.log(`[ORCHESTRATOR] Assembling outreach context for ${vendor.name}...`);
                         const ctx = await assembleOutreachContext(runId, vendor.id);
 
-                        const { dialNumber, isOverridden } = resolveDialNumber(vendor.phone!, i);
+                        const { dialNumber, isOverridden } = resolveDialNumber(vendor.phone!, vendor.id);
                         if (isOverridden) {
                             console.log(`[ORCHESTRATOR] ⚠️ TEST MODE: Calling ${dialNumber} instead of ${vendor.phone} for ${vendor.name}`);
                         }

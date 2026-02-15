@@ -176,6 +176,7 @@ export default function ProcurementAgent() {
     setCalls([])
     setSummary(null)
     setActiveServices(DEFAULT_SERVICES)
+    setEverActive(DEFAULT_SERVICES)
     hasAutoStarted.current = false
     setDashboardReady(false)
   }, [])
