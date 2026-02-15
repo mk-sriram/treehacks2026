@@ -47,7 +47,7 @@ export async function runOrchestrator(runId: string) {
         emitRunEvent(runId, { type: 'stage_change', payload: { stage: 'finding_suppliers' } });
         emitRunEvent(runId, {
             type: 'services_change',
-            payload: { perplexity: true, elasticsearch: true, gemini: false, stagehand: false, elevenlabs: false, visa: false },
+            payload: { perplexity: true, elasticsearch: true, openai: false, stagehand: false, elevenlabs: false, visa: false },
         });
 
         // Memory check activity
@@ -208,7 +208,7 @@ export async function runOrchestrator(runId: string) {
         emitRunEvent(runId, { type: 'stage_change', payload: { stage: 'calling_for_quote' } });
         emitRunEvent(runId, {
             type: 'services_change',
-            payload: { perplexity: false, elasticsearch: true, gemini: false, stagehand: false, elevenlabs: true, visa: false },
+            payload: { perplexity: false, elasticsearch: true, openai: false, stagehand: false, elevenlabs: true, visa: false },
         });
 
         if (vendorsWithPhone.length === 0) {
@@ -245,9 +245,7 @@ export async function runOrchestrator(runId: string) {
 
             // ===== ROUND 1: Trigger outbound calls for initial quotes =====
             const agentIdQuote = process.env.ELEVENLABS_AGENT_ID_QUOTE;
-            const agentIdNegotiate = process.env.ELEVENLABS_AGENT_ID_NEGOTIATE;
             const agentPhoneNumberId = process.env.ELEVENLABS_PHONE_NUMBER_ID;
-            const MAX_CONCURRENT_CALLS = 3;
 
             if (!agentIdQuote || !agentPhoneNumberId) {
                 console.error('[ORCHESTRATOR] Missing ELEVENLABS_AGENT_ID_QUOTE or ELEVENLABS_PHONE_NUMBER_ID — skipping calls');
@@ -258,138 +256,147 @@ export async function runOrchestrator(runId: string) {
             } else {
                 const callResults: Array<{ vendorName: string; callId: string; conversationId: string; success: boolean; error?: string }> = [];
 
-                // Process vendors in batches of MAX_CONCURRENT_CALLS
-                for (let batchStart = 0; batchStart < vendorsWithPhone.length; batchStart += MAX_CONCURRENT_CALLS) {
-                    // TEST MODE: Only call the first vendor
-                    const batch = vendorsWithPhone.slice(0, 3);
-                    console.log(`[ORCHESTRATOR] TEST MODE: Calling only 1 vendor: ${batch[0].name}`);
+                // Limit to top 3 vendors for testing
+                const vendorsToCall = vendorsWithPhone.slice(0, 3);
+                console.log(`[ORCHESTRATOR] Calling ${vendorsToCall.length} vendors (of ${vendorsWithPhone.length} total)...`);
 
-                    // Stop loop after first batch
-                    batchStart = vendorsWithPhone.length;
+                // Set status BEFORE firing calls to prevent race condition:
+                // If a call completes quickly, the webhook's checkRoundCompletion
+                // needs status to already be 'calling_round_1' for the CAS check.
+                await prisma.run.update({ where: { id: runId }, data: { status: 'calling_round_1' } });
 
-                    const batchPromises = batch.map(async (vendor, i) => {
-                        const callActivityId = makeActivityId();
-                        emitRunEvent(runId, {
-                            type: 'activity',
-                            payload: {
-                                id: callActivityId,
-                                type: 'call',
-                                title: `Calling ${vendor.name}`,
-                                description: `Dialing ${vendor.phone} to request pricing quote...`,
-                                timestamp: new Date(),
-                                status: 'running',
-                                tool: 'elevenlabs',
+                // Create placeholder Call rows BEFORE firing calls.
+                // This ensures checkRoundCompletion always sees the correct count,
+                // even if a call completes before other calls are initiated.
+                const placeholderCalls = await Promise.all(
+                    vendorsToCall.map(vendor =>
+                        prisma.call.create({
+                            data: {
+                                vendorId: vendor.id,
+                                runId,
+                                round: 1,
+                                status: 'pending',  // will be updated to 'in-progress' after triggerOutboundCall
+                            },
+                        })
+                    )
+                );
+                console.log(`[ORCHESTRATOR] Created ${placeholderCalls.length} placeholder Call rows`);
+
+                const callPromises = vendorsToCall.map(async (vendor, i) => {
+                    const placeholderCall = placeholderCalls[i];
+                    const callActivityId = makeActivityId();
+                    emitRunEvent(runId, {
+                        type: 'activity',
+                        payload: {
+                            id: callActivityId,
+                            type: 'call',
+                            title: `Calling ${vendor.name}`,
+                            description: `Dialing ${vendor.phone} to request pricing quote...`,
+                            timestamp: new Date(),
+                            status: 'running',
+                            tool: 'elevenlabs',
+                        },
+                    });
+
+                    try {
+                        console.log(`[ORCHESTRATOR] Assembling outreach context for ${vendor.name}...`);
+                        const ctx = await assembleOutreachContext(runId, vendor.id);
+
+                        const { dialNumber, isOverridden } = resolveDialNumber(vendor.phone!, i);
+                        if (isOverridden) {
+                            console.log(`[ORCHESTRATOR] ⚠️ TEST MODE: Calling ${dialNumber} instead of ${vendor.phone} for ${vendor.name}`);
+                        }
+
+                        const dynamicVariables = buildDynamicVariables(ctx, runId, vendor.id, 1);
+
+                        console.log(`[ORCHESTRATOR] Triggering call to ${vendor.name} at ${dialNumber}...`);
+                        const callResponse = await triggerOutboundCall({
+                            agentId: agentIdQuote!,
+                            agentPhoneNumberId,
+                            toNumber: dialNumber,
+                            dynamicVariables,
+                        });
+
+                        // Update placeholder row with conversationId + status
+                        const callStatus = callResponse.conversation_id ? 'in-progress' : 'failed';
+                        await prisma.call.update({
+                            where: { id: placeholderCall.id },
+                            data: {
+                                conversationId: callResponse.conversation_id,
+                                status: callStatus,
                             },
                         });
 
-                        try {
-                            // Assemble outreach context from PG + ES
-                            console.log(`[ORCHESTRATOR] Assembling outreach context for ${vendor.name}...`);
-                            const ctx = await assembleOutreachContext(runId, vendor.id);
-
-                            // Resolve phone number (may be overridden for testing)
-                            const vendorIndex = batchStart + i;
-                            const { dialNumber, isOverridden } = resolveDialNumber(vendor.phone!, vendorIndex);
-                            if (isOverridden) {
-                                console.log(`[ORCHESTRATOR] ⚠️ TEST MODE: Calling ${dialNumber} instead of ${vendor.phone} for ${vendor.name}`);
-                            }
-
-                            // Build dynamic variables (injected into prompt {{var}} templates)
-                            const dynamicVariables = buildDynamicVariables(ctx, runId, vendor.id, 1);
-
-                            // Trigger outbound call
-                            console.log(`[ORCHESTRATOR] Triggering call to ${vendor.name} at ${dialNumber}...`);
-                            const callResponse = await triggerOutboundCall({
-                                agentId: agentIdQuote!,
-                                agentPhoneNumberId,
-                                toNumber: dialNumber,
-                                dynamicVariables,
-                            });
-
-                            // Create Call row in Postgres
-                            // If conversation_id is null, the call failed to initiate — mark as failed immediately
-                            const callStatus = callResponse.conversation_id ? 'in-progress' : 'failed';
-                            const call = await prisma.call.create({
-                                data: {
-                                    vendorId: vendor.id,
-                                    runId,
-                                    round: 1,
-                                    conversationId: callResponse.conversation_id,
-                                    status: callStatus,
-                                },
-                            });
-
-                            if (!callResponse.conversation_id) {
-                                console.warn(`[ORCHESTRATOR] conversation_id is null for ${vendor.name} — call marked as failed (no webhook will fire)`);
-                            }
-
-                            callResults.push({
-                                vendorName: vendor.name,
-                                callId: call.id,
-                                conversationId: callResponse.conversation_id ?? '',
-                                success: !!callResponse.conversation_id,
-                            });
-
-                            console.log(`[ORCHESTRATOR] Call initiated — vendor=${vendor.name}, callId=${call.id}, conversationId=${callResponse.conversation_id}, status=${callStatus}`);
-
-                            emitRunEvent(runId, {
-                                type: 'update_activity',
-                                payload: {
-                                    id: callActivityId,
-                                    updates: {
-                                        status: 'done',
-                                        description: `Call placed to ${vendor.name}${isOverridden ? ' (test mode)' : ` at ${vendor.phone}`}. Waiting for transcript...`,
-                                    },
-                                },
-                            });
-
-                            // Emit calls_change so frontend PhoneCallPanel updates in real time
-                            const allCalls = await prisma.call.findMany({
-                                where: { runId },
-                                include: { vendor: { select: { name: true } } },
-                                orderBy: { createdAt: 'asc' },
-                            });
-                            emitRunEvent(runId, {
-                                type: 'calls_change',
-                                payload: allCalls.map(c => ({
-                                    id: c.id,
-                                    supplier: c.vendor.name,
-                                    status: c.status === 'in-progress' ? 'connected' : c.status === 'completed' ? 'ended' : c.status === 'failed' ? 'ended' : 'ringing',
-                                    duration: c.duration ?? 0,
-                                })),
-                            });
-                        } catch (err) {
-                            console.error(`[ORCHESTRATOR] Failed to call ${vendor.name}:`, err);
-                            callResults.push({
-                                vendorName: vendor.name,
-                                callId: '',
-                                conversationId: '',
-                                success: false,
-                                error: (err as Error).message,
-                            });
-
-                            emitRunEvent(runId, {
-                                type: 'update_activity',
-                                payload: {
-                                    id: callActivityId,
-                                    updates: {
-                                        status: 'error',
-                                        description: `Failed to call ${vendor.name}: ${(err as Error).message.slice(0, 100)}`,
-                                    },
-                                },
-                            });
+                        if (!callResponse.conversation_id) {
+                            console.warn(`[ORCHESTRATOR] conversation_id is null for ${vendor.name} — call marked as failed`);
                         }
-                    });
 
-                    // Wait for entire batch to finish before starting next batch
-                    await Promise.allSettled(batchPromises);
+                        callResults.push({
+                            vendorName: vendor.name,
+                            callId: placeholderCall.id,
+                            conversationId: callResponse.conversation_id ?? '',
+                            success: !!callResponse.conversation_id,
+                        });
 
-                    // Brief delay between batches
-                    if (batchStart + MAX_CONCURRENT_CALLS < vendorsWithPhone.length) {
-                        console.log(`[ORCHESTRATOR] Batch complete, pausing before next batch...`);
-                        await sleep(2000);
+                        console.log(`[ORCHESTRATOR] Call initiated — vendor=${vendor.name}, callId=${placeholderCall.id}, conversationId=${callResponse.conversation_id}, status=${callStatus}`);
+
+                        emitRunEvent(runId, {
+                            type: 'update_activity',
+                            payload: {
+                                id: callActivityId,
+                                updates: {
+                                    status: 'done',
+                                    description: `Call placed to ${vendor.name}${isOverridden ? ' (test mode)' : ` at ${vendor.phone}`}. Waiting for transcript...`,
+                                },
+                            },
+                        });
+
+                        // Emit calls_change so frontend updates
+                        const allCalls = await prisma.call.findMany({
+                            where: { runId },
+                            include: { vendor: { select: { name: true } } },
+                            orderBy: { createdAt: 'asc' },
+                        });
+                        emitRunEvent(runId, {
+                            type: 'calls_change',
+                            payload: allCalls.map(c => ({
+                                id: c.id,
+                                supplier: c.vendor.name,
+                                status: c.status === 'in-progress' ? 'connected' : c.status === 'completed' ? 'ended' : c.status === 'failed' ? 'ended' : 'ringing',
+                                duration: c.duration ?? 0,
+                            })),
+                        });
+                    } catch (err) {
+                        console.error(`[ORCHESTRATOR] Failed to call ${vendor.name}:`, err);
+
+                        // Mark placeholder as failed
+                        await prisma.call.update({
+                            where: { id: placeholderCall.id },
+                            data: { status: 'failed' },
+                        }).catch(e => console.error(`[ORCHESTRATOR] Failed to mark call as failed:`, e));
+
+                        callResults.push({
+                            vendorName: vendor.name,
+                            callId: placeholderCall.id,
+                            conversationId: '',
+                            success: false,
+                            error: (err as Error).message,
+                        });
+
+                        emitRunEvent(runId, {
+                            type: 'update_activity',
+                            payload: {
+                                id: callActivityId,
+                                updates: {
+                                    status: 'error',
+                                    description: `Failed to call ${vendor.name}: ${(err as Error).message.slice(0, 100)}`,
+                                },
+                            },
+                        });
                     }
-                }
+                });
+
+                await Promise.allSettled(callPromises);
 
                 // Update call plan summary
                 const successCount = callResults.filter(r => r.success).length;
@@ -413,7 +420,6 @@ export async function runOrchestrator(runId: string) {
                 //   2. Check if all round 1 calls are done
                 //   3. Auto-trigger round 2 negotiation (startNegotiationRound)
                 //   4. Auto-trigger final summary (finalizeSummary)
-                await prisma.run.update({ where: { id: runId }, data: { status: 'calling_round_1' } });
             }
         }
 
