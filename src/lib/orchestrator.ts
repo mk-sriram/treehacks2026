@@ -303,24 +303,30 @@ export async function runOrchestrator(runId: string) {
                             });
 
                             // Create Call row in Postgres
+                            // If conversation_id is null, the call failed to initiate — mark as failed immediately
+                            const callStatus = callResponse.conversation_id ? 'in-progress' : 'failed';
                             const call = await prisma.call.create({
                                 data: {
                                     vendorId: vendor.id,
                                     runId,
                                     round: 1,
                                     conversationId: callResponse.conversation_id,
-                                    status: 'in-progress',
+                                    status: callStatus,
                                 },
                             });
+
+                            if (!callResponse.conversation_id) {
+                                console.warn(`[ORCHESTRATOR] conversation_id is null for ${vendor.name} — call marked as failed (no webhook will fire)`);
+                            }
 
                             callResults.push({
                                 vendorName: vendor.name,
                                 callId: call.id,
-                                conversationId: callResponse.conversation_id,
-                                success: true,
+                                conversationId: callResponse.conversation_id ?? '',
+                                success: !!callResponse.conversation_id,
                             });
 
-                            console.log(`[ORCHESTRATOR] Call initiated — vendor=${vendor.name}, callId=${call.id}, conversationId=${callResponse.conversation_id}`);
+                            console.log(`[ORCHESTRATOR] Call initiated — vendor=${vendor.name}, callId=${call.id}, conversationId=${callResponse.conversation_id}, status=${callStatus}`);
 
                             emitRunEvent(runId, {
                                 type: 'update_activity',
@@ -331,6 +337,22 @@ export async function runOrchestrator(runId: string) {
                                         description: `Call placed to ${vendor.name}${isOverridden ? ' (test mode)' : ` at ${vendor.phone}`}. Waiting for transcript...`,
                                     },
                                 },
+                            });
+
+                            // Emit calls_change so frontend PhoneCallPanel updates in real time
+                            const allCalls = await prisma.call.findMany({
+                                where: { runId },
+                                include: { vendor: { select: { name: true } } },
+                                orderBy: { createdAt: 'asc' },
+                            });
+                            emitRunEvent(runId, {
+                                type: 'calls_change',
+                                payload: allCalls.map(c => ({
+                                    id: c.id,
+                                    supplier: c.vendor.name,
+                                    status: c.status === 'in-progress' ? 'connected' : c.status === 'completed' ? 'ended' : c.status === 'failed' ? 'ended' : 'ringing',
+                                    duration: c.duration ?? 0,
+                                })),
                             });
                         } catch (err) {
                             console.error(`[ORCHESTRATOR] Failed to call ${vendor.name}:`, err);

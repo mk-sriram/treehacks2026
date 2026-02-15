@@ -64,17 +64,23 @@ export async function POST(
         });
 
         // 7. Create Call row in Postgres
+        // If conversation_id is null, the call failed to initiate — mark as failed immediately
+        const callStatus = callResponse.conversation_id ? 'in-progress' : 'failed';
         const call = await prisma.call.create({
             data: {
                 vendorId,
                 runId,
                 round,
                 conversationId: callResponse.conversation_id,
-                status: 'in-progress',
+                status: callStatus,
             },
         });
 
-        console.log(`[API /call] Call created — id=${call.id}, conversationId=${callResponse.conversation_id}`);
+        if (!callResponse.conversation_id) {
+            console.warn(`[API /call] conversation_id is null — call marked as failed (no webhook will fire)`);
+        }
+
+        console.log(`[API /call] Call created — id=${call.id}, conversationId=${callResponse.conversation_id}, status=${callStatus}`);
 
         return NextResponse.json({
             callId: call.id,
@@ -83,6 +89,7 @@ export async function POST(
             vendor: vendor.name,
             round,
             testMode: isOverridden,
+            status: callStatus,
         });
     } catch (err: any) {
         console.error(`[API /call] Error:`, err);

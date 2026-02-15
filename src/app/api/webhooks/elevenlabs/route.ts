@@ -9,11 +9,36 @@ import { writeMemory } from '@/lib/elastic';
 import { emitRunEvent } from '@/lib/events';
 import { triggerOutboundCall, buildDynamicVariables, resolveDialNumber } from '@/lib/elevenlabs';
 import { assembleOutreachContext } from '@/lib/outreach';
+import { generateNegotiationStrategy, retrieveVendorIntelligence, formatStrategyForAgent, type NegotiationStrategyInput } from '@/lib/negotiation';
 
 let webhookActivityCounter = 0;
 function makeActivityId() {
     webhookActivityCounter++;
     return `wh-${Date.now()}-${webhookActivityCounter}-${Math.random().toString(36).slice(2, 6)}`;
+}
+
+// ─── Helper: emit full calls_change array ────────────────────────────
+
+/**
+ * Re-query all Call rows for a run, join with Vendor names, and emit
+ * a `calls_change` event with the full array. This is what the frontend
+ * PhoneCallPanel expects: [{ id, supplier, status, duration }]
+ */
+async function emitCallsChange(runId: string) {
+    const allCalls = await prisma.call.findMany({
+        where: { runId },
+        include: { vendor: { select: { name: true } } },
+        orderBy: { createdAt: 'asc' },
+    });
+    emitRunEvent(runId, {
+        type: 'calls_change',
+        payload: allCalls.map(c => ({
+            id: c.id,
+            supplier: c.vendor.name,
+            status: c.status === 'in-progress' ? 'connected' : c.status === 'completed' ? 'ended' : c.status === 'failed' ? 'ended' : 'ringing',
+            duration: c.duration ?? 0,
+        })),
+    });
 }
 
 // ─── Webhook entry point ─────────────────────────────────────────────
@@ -41,9 +66,18 @@ export async function POST(req: Request) {
 
         switch (eventType) {
             case 'post_call_transcription':
-                return handlePostCallTranscription(body);
+                // Return 200 immediately so ElevenLabs doesn't timeout/retry.
+                // Process the transcription asynchronously in the background.
+                void processPostCallTranscription(body).catch(err =>
+                    console.error('[WEBHOOK] Background transcription processing error:', err)
+                );
+                return NextResponse.json({ received: true, handled: true });
             case 'call_initiation_failure':
-                return handleCallInitiationFailure(body);
+                // Return 200 immediately, process async
+                void processCallInitiationFailure(body).catch(err =>
+                    console.error('[WEBHOOK] Background failure processing error:', err)
+                );
+                return NextResponse.json({ received: true, handled: true });
             case 'post_call_audio':
                 // We don't need audio — just acknowledge
                 console.log(`[WEBHOOK] Ignoring post_call_audio event`);
@@ -59,9 +93,9 @@ export async function POST(req: Request) {
     }
 }
 
-// ─── post_call_transcription handler ─────────────────────────────────
+// ─── post_call_transcription processor (runs in background) ──────────
 
-async function handlePostCallTranscription(body: any) {
+async function processPostCallTranscription(body: any) {
     const data = body.data;
     const conversationId = data?.conversation_id;
     const status = data?.status;  // "done" | "failed" etc.
@@ -91,7 +125,7 @@ async function handlePostCallTranscription(body: any) {
 
     if (!conversationId) {
         console.error('[WEBHOOK] No conversation_id in payload — cannot map to a call');
-        return NextResponse.json({ received: true, error: 'no conversation_id' }, { status: 200 });
+        return;
     }
 
     // 1. Find the Call row by conversationId
@@ -102,7 +136,7 @@ async function handlePostCallTranscription(body: any) {
 
     if (!call) {
         console.error(`[WEBHOOK] No Call row found for conversationId=${conversationId}`);
-        return NextResponse.json({ received: true, error: 'call not found' }, { status: 200 });
+        return;
     }
 
     console.log(`[WEBHOOK] Mapped to — runId=${call.runId}, vendor=${call.vendor.name}, round=${call.round}`);
@@ -192,17 +226,8 @@ async function handlePostCallTranscription(body: any) {
         },
     });
 
-    emitRunEvent(call.runId, {
-        type: 'call_update',
-        payload: {
-            vendorId: call.vendorId,
-            vendorName: call.vendor.name,
-            status: 'completed',
-            round: call.round,
-            hasOffer: !!extractedOffer,
-            duration: callDurationSecs,
-        },
-    });
+    // Emit full calls_change array so frontend PhoneCallPanel updates
+    await emitCallsChange(call.runId);
 
     console.log(`[WEBHOOK] Done processing transcription for ${call.vendor.name}`);
 
@@ -210,13 +235,11 @@ async function handlePostCallTranscription(body: any) {
     checkRoundCompletion(call.runId, call.round).catch(err =>
         console.error(`[WEBHOOK] checkRoundCompletion error (non-fatal):`, err)
     );
-
-    return NextResponse.json({ received: true, handled: true });
 }
 
-// ─── call_initiation_failure handler ─────────────────────────────────
+// ─── call_initiation_failure processor (runs in background) ──────────
 
-async function handleCallInitiationFailure(body: any) {
+async function processCallInitiationFailure(body: any) {
     const data = body.data;
     const conversationId = data?.conversation_id;
     const failureReason = data?.failure_reason ?? 'unknown';
@@ -224,7 +247,8 @@ async function handleCallInitiationFailure(body: any) {
     console.log(`[WEBHOOK] Call initiation failure — conversation_id=${conversationId}, reason=${failureReason}`);
 
     if (!conversationId) {
-        return NextResponse.json({ received: true, error: 'no conversation_id' }, { status: 200 });
+        console.error('[WEBHOOK] No conversation_id in failure payload');
+        return;
     }
 
     const call = await prisma.call.findUnique({
@@ -253,13 +277,14 @@ async function handleCallInitiationFailure(body: any) {
 
         console.log(`[WEBHOOK] Call marked as failed for ${call.vendor.name}`);
 
+        // Emit full calls_change array so frontend PhoneCallPanel updates
+        await emitCallsChange(call.runId);
+
         // Check if all calls for this round are done — advance the pipeline
         checkRoundCompletion(call.runId, call.round).catch(err =>
             console.error(`[WEBHOOK] checkRoundCompletion error (non-fatal):`, err)
         );
     }
-
-    return NextResponse.json({ received: true, handled: true });
 }
 
 // ─── LLM-based offer extraction ─────────────────────────────────────
@@ -488,8 +513,21 @@ async function startNegotiationRound(runId: string) {
         .map(o => `${o.vendor.name}: $${o.unitPrice}/unit, ${o.leadTimeDays ?? '?'} day lead time`)
         .join('; ');
 
-    // Get vendors to negotiate with (all who gave a round 1 offer)
-    const vendorsToNegotiate = round1Offers.map(o => o.vendor);
+    // Get vendors to negotiate with — only those ABOVE best price (skip the best-price vendor)
+    const vendorsToNegotiate = round1Offers
+        .filter(o => o.vendorId !== bestOffer.vendorId)
+        .map(o => o.vendor);
+
+    if (vendorsToNegotiate.length === 0) {
+        console.log(`[WEBHOOK] No vendors above best price to negotiate with — skipping to summary`);
+        await prisma.run.update({ where: { id: runId }, data: { status: 'summarizing' } });
+        finalizeSummary(runId).catch(console.error);
+        return;
+    }
+
+    // Load run spec for item/quantity context
+    const run = await prisma.run.findUniqueOrThrow({ where: { id: runId } });
+    const spec = run.parsedSpec as { item: string; quantity: string; leadTime?: string; quality?: string };
 
     emitRunEvent(runId, {
         type: 'activity',
@@ -497,13 +535,98 @@ async function startNegotiationRound(runId: string) {
             id: makeActivityId(),
             type: 'system',
             title: 'Starting Negotiation Round',
-            description: `Round 1 collected ${round1Offers.length} quotes. Best: $${bestPrice}/unit from ${bestSupplier}. Target: $${targetPrice}/unit. Calling ${vendorsToNegotiate.length} vendors.`,
+            description: `Round 1 collected ${round1Offers.length} quotes. Best: $${bestPrice}/unit from ${bestSupplier}. Generating per-vendor negotiation strategies for ${vendorsToNegotiate.length} vendors...`,
             timestamp: new Date(),
             status: 'running',
             tool: 'elevenlabs',
         },
     });
 
+    // Enable services indicator for the strategy generation phase
+    emitRunEvent(runId, {
+        type: 'services_change',
+        payload: { perplexity: false, elasticsearch: true, openai: true, stagehand: false, elevenlabs: true, visa: false },
+    });
+
+    // ===== PHASE 1: Generate per-vendor negotiation strategies via LLM =====
+    // For each vendor: retrieve ES intel → call OpenAI → get tailored strategy
+    const vendorStrategies = new Map<string, string>(); // vendorId → formatted strategy
+
+    // Build a map of vendorId → their R1 offer for quick lookup
+    const r1OfferByVendor = new Map(round1Offers.map(o => [o.vendorId, o]));
+
+    for (const vendor of vendorsToNegotiate) {
+        const strategyActivityId = makeActivityId();
+        emitRunEvent(runId, {
+            type: 'activity',
+            payload: {
+                id: strategyActivityId,
+                type: 'analyze',
+                title: `Analyzing negotiation leverage: ${vendor.name}`,
+                description: `Retrieving discovery data and call transcript from Elasticsearch, then generating LLM strategy...`,
+                timestamp: new Date(),
+                status: 'running',
+                tool: 'openai',
+            },
+        });
+
+        try {
+            // 1. Retrieve ES intelligence (Sonar + R1 call data)
+            const { sonarData, callTranscript } = await retrieveVendorIntelligence(spec.item, vendor.id);
+
+            // 2. Build the strategy input
+            const vendorR1Offer = r1OfferByVendor.get(vendor.id);
+            const strategyInput: NegotiationStrategyInput = {
+                vendorName: vendor.name,
+                vendorId: vendor.id,
+                runId,
+                item: spec.item,
+                quantity: spec.quantity,
+                r1UnitPrice: vendorR1Offer?.unitPrice ?? null,
+                r1Moq: vendorR1Offer?.moq ?? null,
+                r1LeadTimeDays: vendorR1Offer?.leadTimeDays ?? null,
+                r1Terms: vendorR1Offer?.terms ?? null,
+                r1Transcript: vendorR1Offer?.rawEvidence ?? null,
+                bestPrice: `$${bestPrice}`,
+                bestSupplier,
+                allCompetingOffers: competingText,
+            };
+
+            // 3. Generate LLM strategy
+            const strategy = await generateNegotiationStrategy(strategyInput, sonarData, callTranscript);
+            const formattedStrategy = formatStrategyForAgent(strategy);
+            vendorStrategies.set(vendor.id, formattedStrategy);
+
+            console.log(`[WEBHOOK] Strategy generated for ${vendor.name}: target=${strategy.targetPrice}, leverage=${strategy.keyLeveragePoints.length} points`);
+
+            emitRunEvent(runId, {
+                type: 'update_activity',
+                payload: {
+                    id: strategyActivityId,
+                    updates: {
+                        status: 'done',
+                        description: `Strategy ready: targeting ${strategy.targetPrice}. Leverage: ${strategy.keyLeveragePoints.slice(0, 2).join('; ')}`,
+                    },
+                },
+            });
+        } catch (err) {
+            console.error(`[WEBHOOK] Strategy generation failed for ${vendor.name}:`, err);
+            emitRunEvent(runId, {
+                type: 'update_activity',
+                payload: {
+                    id: strategyActivityId,
+                    updates: {
+                        status: 'error',
+                        description: `Strategy generation failed — will use default negotiation approach.`,
+                    },
+                },
+            });
+        }
+    }
+
+    console.log(`[WEBHOOK] All strategies generated — ${vendorStrategies.size}/${vendorsToNegotiate.length} succeeded`);
+
+    // ===== PHASE 2: Fire negotiation calls with per-vendor strategies =====
     await prisma.run.update({ where: { id: runId }, data: { status: 'calling_round_2' } });
 
     const MAX_CONCURRENT = 3;
@@ -518,6 +641,9 @@ async function startNegotiationRound(runId: string) {
                 ctx.targetPrice = targetPrice;
                 ctx.competingOffers = competingText;
 
+                // Inject the LLM-generated negotiation strategy
+                ctx.negotiationPlan = vendorStrategies.get(vendor.id) ?? '';
+
                 const vendorIndex = i + batchIdx;
                 const { dialNumber } = resolveDialNumber(vendor.phone ?? '', vendorIndex);
                 const dynamicVars = buildDynamicVariables(ctx, runId, vendor.id, 2);
@@ -529,23 +655,41 @@ async function startNegotiationRound(runId: string) {
                     dynamicVariables: dynamicVars,
                 });
 
+                // Handle null conversation_id
+                const callStatus = callResponse.conversation_id ? 'in-progress' : 'failed';
                 await prisma.call.create({
                     data: {
                         runId,
                         vendorId: vendor.id,
                         round: 2,
-                        status: 'in-progress',
+                        status: callStatus,
                         conversationId: callResponse.conversation_id,
                     },
                 });
 
-                console.log(`[WEBHOOK] Round 2 call placed → ${vendor.name} (${dialNumber})`);
+                if (!callResponse.conversation_id) {
+                    console.warn(`[WEBHOOK] Round 2 conversation_id is null for ${vendor.name} — marked as failed`);
+                }
+
+                console.log(`[WEBHOOK] Round 2 call placed → ${vendor.name} (${dialNumber}), status=${callStatus}`);
             } catch (err) {
                 console.error(`[WEBHOOK] Round 2 call failed for ${vendor.name}:`, err);
+                // Create a failed call row so checkRoundCompletion doesn't hang
+                await prisma.call.create({
+                    data: {
+                        runId,
+                        vendorId: vendor.id,
+                        round: 2,
+                        status: 'failed',
+                    },
+                }).catch(e => console.error(`[WEBHOOK] Failed to create failed call row:`, e));
             }
         });
         await Promise.allSettled(promises);
     }
+
+    // Emit calls_change so frontend shows the round 2 calls
+    await emitCallsChange(runId);
 
     console.log(`[WEBHOOK] All round 2 negotiation calls fired`);
 }

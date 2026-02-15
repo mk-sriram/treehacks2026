@@ -20,7 +20,7 @@ export interface OutboundCallRequest {
 export interface OutboundCallResponse {
     success: boolean;
     message: string;
-    conversation_id: string;
+    conversation_id: string | null;  // null if call failed to initiate
     callSid: string;
 }
 
@@ -86,7 +86,7 @@ export async function triggerOutboundCall(
  *   {{vendor_name}}, {{vendor_phone}}, {{vendor_url}}, {{vendor_notes}},
  *   {{item}}, {{quantity}}, {{deadline}}, {{quality}},
  *   {{indicative_pricing}}, {{competing_offers}}, {{past_history}},
- *   {{best_price}}, {{best_supplier}}, {{target_price}} (round 2 only)
+ *   {{best_price}}, {{best_supplier}}, {{target_price}}, {{negotiation_plan}} (round 2 only)
  */
 export function buildDynamicVariables(
     ctx: OutreachContext,
@@ -121,6 +121,9 @@ export function buildDynamicVariables(
         best_price: ctx.bestPrice,
         best_supplier: ctx.bestSupplier,
         target_price: ctx.targetPrice,
+
+        // LLM-generated per-vendor negotiation strategy (round 2 only)
+        negotiation_plan: ctx.negotiationPlan,
     };
 
     return vars;
