@@ -33,6 +33,9 @@ export interface OutreachContext {
   bestPrice: string;
   bestSupplier: string;
   targetPrice: string;
+
+  // LLM-generated per-vendor negotiation strategy (round 2 only, empty on round 1)
+  negotiationPlan: string;
 }
 
 /**
@@ -166,6 +169,9 @@ export async function assembleOutreachContext(
     bestPrice,
     bestSupplier,
     targetPrice,
+
+    // LLM negotiation strategy (injected by startNegotiationRound, empty on round 1)
+    negotiationPlan: '',
   };
 
   console.log(`[OUTREACH] Context assembled for ${vendor.name}:`, {
