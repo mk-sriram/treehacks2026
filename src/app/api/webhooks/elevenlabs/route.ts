@@ -269,40 +269,54 @@ async function processCallInitiationFailure(body: any) {
         return;
     }
 
-    const call = await prisma.call.findUnique({
+    // Retry lookup — the placeholder row may not have its conversationId set yet
+    // if the failure webhook arrives before triggerOutboundCall returns.
+    let call = await prisma.call.findUnique({
         where: { conversationId },
         include: { vendor: true },
     });
 
-    if (call) {
-        await prisma.call.update({
-            where: { id: call.id },
-            data: { status: 'failed' },
+    if (!call) {
+        console.log(`[WEBHOOK] Call row not found for failure conversationId=${conversationId} — retrying in 3s...`);
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        call = await prisma.call.findUnique({
+            where: { conversationId },
+            include: { vendor: true },
         });
-
-        emitRunEvent(call.runId, {
-            type: 'activity',
-            payload: {
-                id: makeActivityId(),
-                type: 'call',
-                title: `Call failed: ${call.vendor.name}`,
-                description: `Call could not connect: ${failureReason}`,
-                timestamp: new Date(),
-                status: 'error',
-                tool: 'elevenlabs',
-            },
-        });
-
-        console.log(`[WEBHOOK] Call marked as failed for ${call.vendor.name}`);
-
-        // Emit full calls_change array so frontend PhoneCallPanel updates
-        await emitCallsChange(call.runId);
-
-        // Check if all calls for this round are done — advance the pipeline
-        checkRoundCompletion(call.runId, call.round).catch(err =>
-            console.error(`[WEBHOOK] checkRoundCompletion error (non-fatal):`, err)
-        );
     }
+
+    if (!call) {
+        console.error(`[WEBHOOK] No Call row found for failure conversationId=${conversationId} after retry — pipeline may stall`);
+        return;
+    }
+
+    await prisma.call.update({
+        where: { id: call.id },
+        data: { status: 'failed' },
+    });
+
+    emitRunEvent(call.runId, {
+        type: 'activity',
+        payload: {
+            id: makeActivityId(),
+            type: 'call',
+            title: `Call failed: ${call.vendor.name}`,
+            description: `Call could not connect: ${failureReason}`,
+            timestamp: new Date(),
+            status: 'error',
+            tool: 'elevenlabs',
+        },
+    });
+
+    console.log(`[WEBHOOK] Call marked as failed for ${call.vendor.name}`);
+
+    // Emit full calls_change array so frontend PhoneCallPanel updates
+    await emitCallsChange(call.runId);
+
+    // Check if all calls for this round are done — advance the pipeline
+    checkRoundCompletion(call.runId, call.round).catch(err =>
+        console.error(`[WEBHOOK] checkRoundCompletion error (non-fatal):`, err)
+    );
 }
 
 // ─── LLM-based offer extraction ─────────────────────────────────────
