@@ -247,7 +247,7 @@ export function RequirementsChat({ onComplete }) {
         throw new Error(`API error ${res.status}`);
       }
     } catch (e) {
-      console.error('⚠️ [FALLBACK] Gemini API extraction failed. Switching to Regex parser.', e);
+      console.error('⚠️ [FALLBACK] OpenAI API extraction failed. Switching to Regex parser.', e);
       extracted = parseRequirements(allMessages) || {};
     }
 

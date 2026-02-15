@@ -261,7 +261,7 @@ export async function runOrchestrator(runId: string) {
                 // Process vendors in batches of MAX_CONCURRENT_CALLS
                 for (let batchStart = 0; batchStart < vendorsWithPhone.length; batchStart += MAX_CONCURRENT_CALLS) {
                     // TEST MODE: Only call the first vendor
-                    const batch = vendorsWithPhone.slice(0, 1);
+                    const batch = vendorsWithPhone.slice(0, 3);
                     console.log(`[ORCHESTRATOR] TEST MODE: Calling only 1 vendor: ${batch[0].name}`);
 
                     // Stop loop after first batch

@@ -45,7 +45,7 @@ const DEFAULT_SERVICES = {
   stagehand: false,
   elevenlabs: false,
   elasticsearch: false,
-  gemini: false,
+  openai: false,
   visa: false,
 }
 
@@ -411,10 +411,10 @@ export default function ProcurementAgent() {
                   wasActive={everActive.elasticsearch}
                 />
                 <ServiceItem
-                  label="Gemini 2.5 Flash"
+                  label="OpenAI GPT-4o-mini"
                   description="Extraction & negotiation strategy"
-                  active={activeServices.gemini}
-                  wasActive={everActive.gemini}
+                  active={activeServices.openai}
+                  wasActive={everActive.openai}
                 />
                 <ServiceItem
                   label="Visa B2B + Coinbase"
