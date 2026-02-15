@@ -135,24 +135,44 @@ export async function runOrchestrator(runId: string) {
     }
     console.log(`[ORCHESTRATOR] All ${createdVendors.length} vendors stored in Postgres`);
 
-    // Index discovery results into ES
-    console.log(`[ORCHESTRATOR] Indexing discovery results into Elasticsearch...`);
-    try {
-      const discoveryText = deduped
-        .map(
-          (v) =>
-            `Vendor: ${v.name}. ${v.match ?? ''} Pricing: ${v.pricing ?? 'N/A'}. Lead time: ${v.leadTime ?? 'N/A'}. Notes: ${v.notes ?? ''}`
-        )
-        .join('\n');
+    // Index discovery results into ES — one document per vendor
+    console.log(`[ORCHESTRATOR] Indexing per-vendor discovery results into Elasticsearch...`);
+    const esWriteResults = await Promise.allSettled(
+      createdVendors.map((vendor, idx) => {
+        const src = deduped[idx];
+        const text = [
+          `Vendor: ${vendor.name}.`,
+          src.match ? `Match: ${src.match}` : null,
+          `Pricing: ${src.pricing ?? 'N/A'}.`,
+          `Lead time: ${src.leadTime ?? 'N/A'}.`,
+          src.notes ? `Notes: ${src.notes}` : null,
+          `Contact: ${src.contactMethod ?? 'unknown'}.`,
+          vendor.phone ? `Phone: ${vendor.phone}.` : null,
+          vendor.url ? `URL: ${vendor.url}.` : null,
+        ]
+          .filter(Boolean)
+          .join(' ');
 
-      await writeMemory({
-        text: discoveryText,
-        run_id: runId,
-        channel: 'search',
+        return writeMemory({
+          text,
+          run_id: runId,
+          vendor_id: vendor.id,
+          channel: 'search',
+        }).then(() => {
+          console.log(`[ORCHESTRATOR] ES indexed vendor: ${vendor.name} (id=${vendor.id}, text length=${text.length})`);
+        });
+      })
+    );
+
+    const esSucceeded = esWriteResults.filter((r) => r.status === 'fulfilled').length;
+    const esFailed = esWriteResults.filter((r) => r.status === 'rejected').length;
+    console.log(`[ORCHESTRATOR] ES indexing complete — ${esSucceeded} succeeded, ${esFailed} failed`);
+    if (esFailed > 0) {
+      esWriteResults.forEach((r, i) => {
+        if (r.status === 'rejected') {
+          console.error(`[ORCHESTRATOR] ES write failed for vendor ${createdVendors[i].name}:`, r.reason);
+        }
       });
-      console.log(`[ORCHESTRATOR] Discovery results indexed in ES (text length=${discoveryText.length})`);
-    } catch (err) {
-      console.error('[ORCHESTRATOR] Failed to write discovery to ES (non-fatal):', err);
     }
 
     // Emit summary activity for discovery -- categorize vendors by contact method
