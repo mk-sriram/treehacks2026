@@ -1,0 +1,17 @@
+{
+  "name": "wallet-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Standalone x402-compatible dummy wallet server for local development",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "dotenv": "^17.3.1"
+  }
+}
