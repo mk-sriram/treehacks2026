@@ -4,6 +4,7 @@
 // Also drives the pipeline forward: round 1 → negotiation → summary.
 
 import { NextResponse } from 'next/server';
+import OpenAI from 'openai';
 import { prisma } from '@/lib/db';
 import { writeMemory } from '@/lib/elastic';
 import { emitRunEvent } from '@/lib/events';
@@ -152,39 +153,48 @@ async function processPostCallTranscription(body: any) {
     });
     console.log(`[WEBHOOK] Call row updated — status=completed, duration=${callDurationSecs ?? 'unknown'}s`);
 
+    // Emit full calls_change array so frontend PhoneCallPanel updates IMMEDIATELY
+    await emitCallsChange(call.runId);
+
     // 3. Extract structured offer terms from the transcript via LLM
-    const extractedOffer = await extractOfferViaLLM(transcriptText, call.vendor.name, analysis);
+    let extractedOffer = null;
+    try {
+        extractedOffer = await extractOfferViaLLM(transcriptText, call.vendor.name, analysis);
 
-    if (extractedOffer) {
-        const offer = await prisma.offer.create({
-            data: {
-                vendorId: call.vendorId,
-                unitPrice: extractedOffer.unitPrice,
-                moq: extractedOffer.moq,
-                leadTimeDays: extractedOffer.leadTimeDays,
-                shipping: extractedOffer.shipping,
-                terms: extractedOffer.terms,
-                confidence: extractedOffer.confidence,
-                source: call.round === 1 ? 'voice-call-r1' : 'voice-call-r2',
-                rawEvidence: transcriptText.slice(0, 2000),
-            },
-        });
-        console.log(`[WEBHOOK] Offer created — id=${offer.id}, unitPrice=${offer.unitPrice}, leadTime=${offer.leadTimeDays}d, confidence=${offer.confidence}`);
+        if (extractedOffer) {
+            const offer = await prisma.offer.create({
+                data: {
+                    vendorId: call.vendorId,
+                    unitPrice: extractedOffer.unitPrice,
+                    moq: extractedOffer.moq,
+                    leadTimeDays: extractedOffer.leadTimeDays,
+                    shipping: extractedOffer.shipping,
+                    terms: extractedOffer.terms,
+                    confidence: extractedOffer.confidence,
+                    source: call.round === 1 ? 'voice-call-r1' : 'voice-call-r2',
+                    rawEvidence: transcriptText.slice(0, 2000),
+                },
+            });
+            console.log(`[WEBHOOK] Offer created — id=${offer.id}, unitPrice=${offer.unitPrice}, leadTime=${offer.leadTimeDays}d, confidence=${offer.confidence}`);
 
-        // Emit quote event for the frontend
-        emitRunEvent(call.runId, {
-            type: 'quote',
-            payload: {
-                supplier: call.vendor.name,
-                unitPrice: extractedOffer.unitPrice != null ? `$${extractedOffer.unitPrice}` : 'Not quoted',
-                moq: extractedOffer.moq ?? 'N/A',
-                leadTime: extractedOffer.leadTimeDays != null ? `${extractedOffer.leadTimeDays} days` : 'N/A',
-                shipping: extractedOffer.shipping ?? 'N/A',
-                terms: extractedOffer.terms ?? 'N/A',
-                confidence: extractedOffer.confidence ?? 50,
-                source: call.round === 1 ? 'voice-call' : 'negotiation-call',
-            },
-        });
+            // Emit quote event for the frontend
+            emitRunEvent(call.runId, {
+                type: 'quote',
+                payload: {
+                    supplier: call.vendor.name,
+                    unitPrice: extractedOffer.unitPrice != null ? `$${extractedOffer.unitPrice}` : 'Not quoted',
+                    moq: extractedOffer.moq ?? 'N/A',
+                    leadTime: extractedOffer.leadTimeDays != null ? `${extractedOffer.leadTimeDays} days` : 'N/A',
+                    shipping: extractedOffer.shipping ?? 'N/A',
+                    terms: extractedOffer.terms ?? 'N/A',
+                    confidence: extractedOffer.confidence ?? 50,
+                    source: call.round === 1 ? 'voice-call' : 'negotiation-call',
+                },
+            });
+        }
+    } catch (err) {
+        console.error(`[WEBHOOK] Offer extraction failed for ${call.vendor.name}:`, err);
+        // Continue execution - do not return
     }
 
     // 4. Write transcript + extracted facts to Elasticsearch (memory)
@@ -219,15 +229,12 @@ async function processPostCallTranscription(body: any) {
             title: `Call completed: ${call.vendor.name}`,
             description: extractedOffer
                 ? `Quote received: ${extractedOffer.unitPrice != null ? `$${extractedOffer.unitPrice}/unit` : 'pricing discussed'}, ${extractedOffer.leadTimeDays ? `${extractedOffer.leadTimeDays} day lead time` : 'lead time TBD'}. Confidence: ${extractedOffer.confidence}%.`
-                : `Call completed but no clear quote extracted. Transcript stored for review.`,
+                : `Call completed but no deal extracted. Transcript stored.`,
             timestamp: new Date(),
             status: 'done',
             tool: 'elevenlabs',
         },
     });
-
-    // Emit full calls_change array so frontend PhoneCallPanel updates
-    await emitCallsChange(call.runId);
 
     console.log(`[WEBHOOK] Done processing transcription for ${call.vendor.name}`);
 
@@ -299,8 +306,8 @@ interface ExtractedOffer {
 }
 
 /**
- * Extract structured offer terms from a call transcript using OpenAI.
- * Falls back gracefully if the LLM call fails.
+ * Extract structured offer terms from a call transcript using Gemini.
+ * Falls back gracefully to ElevenLabs analysis if the LLM call fails.
  */
 async function extractOfferViaLLM(
     transcript: string,
@@ -312,12 +319,13 @@ async function extractOfferViaLLM(
         return null;
     }
 
-    const openaiKey = process.env.OPENAI_API_KEY;
-    if (!openaiKey) {
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
         console.warn('[WEBHOOK] OPENAI_API_KEY not set — skipping LLM extraction');
-        // If ElevenLabs gave us data_collection_results, try to use those
         return parseElevenLabsAnalysis(elevenLabsAnalysis);
     }
+
+    const openai = new OpenAI({ apiKey });
 
     const extractionPrompt = `You are a procurement data extraction system. Analyze this phone call transcript between our procurement agent and ${vendorName}. Extract any pricing or offer information discussed.
 
@@ -327,51 +335,31 @@ ${transcript.slice(0, 3000)}
 ${elevenLabsAnalysis?.transcript_summary ? `CALL SUMMARY: ${elevenLabsAnalysis.transcript_summary}` : ''}
 
 Extract the following fields. If a field was not discussed or is unclear, set it to null.
-Return ONLY valid JSON, no markdown, no explanation:
-
-{
-  "unit_price": <number or null — the per-unit price in USD. Convert from other currencies if mentioned.>,
-  "total_price": <number or null — if they quoted a total rather than per-unit>,
-  "moq": <string or null — minimum order quantity, e.g. "100 units" or "1 pallet">,
-  "lead_time_days": <integer or null — delivery/lead time in business days>,
-  "shipping": <string or null — shipping method, cost, or terms mentioned>,
-  "payment_terms": <string or null — e.g. "net-30", "credit card", "wire transfer", "COD">,
-  "confidence": <integer 1-100 — how confident you are that the vendor gave a real, actionable quote vs. vague discussion>,
-  "notes": <string or null — any important context like "price only valid for 7 days" or "requires credit application">
-}`;
+Return ONLY valid JSON.
+`;
 
     try {
         console.log(`[WEBHOOK] Calling OpenAI for offer extraction...`);
-        const res = await fetch('https://api.openai.com/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-                Authorization: `Bearer ${openaiKey}`,
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                model: 'gpt-4o-mini',
-                messages: [{ role: 'user', content: extractionPrompt }],
-                temperature: 0,
-                response_format: { type: 'json_object' },
-            }),
+        const completion = await openai.chat.completions.create({
+            model: "gpt-4o-mini",
+            messages: [
+                { role: "system", content: extractionPrompt },
+                { role: "user", content: "Extract offer details to JSON." }
+            ],
+            response_format: { type: "json_object" },
+            temperature: 0,
         });
 
-        if (!res.ok) {
-            const errText = await res.text();
-            console.error(`[WEBHOOK] OpenAI API error: ${res.status}`, errText.slice(0, 300));
-            return parseElevenLabsAnalysis(elevenLabsAnalysis);
-        }
+        const content = completion.choices[0].message.content;
+        console.log(`[WEBHOOK] OpenAI extraction result:`, content?.slice(0, 500));
 
-        const data = await res.json();
-        const content = data.choices?.[0]?.message?.content ?? '';
-        console.log(`[WEBHOOK] OpenAI extraction result:`, content.slice(0, 500));
+        if (!content) return parseElevenLabsAnalysis(elevenLabsAnalysis);
 
         const parsed = JSON.parse(content);
 
         // Compute unit price from total if only total was given
         let unitPrice = parsed.unit_price;
         if (unitPrice == null && parsed.total_price != null) {
-            // We don't know quantity here, store total as unit price with a note
             unitPrice = parsed.total_price;
         }
 
@@ -384,14 +372,14 @@ Return ONLY valid JSON, no markdown, no explanation:
             confidence: parsed.confidence ?? 50,
         };
     } catch (err) {
-        console.error('[WEBHOOK] LLM extraction failed:', err);
+        console.error('[WEBHOOK] OpenAI extraction failed:', err);
         return parseElevenLabsAnalysis(elevenLabsAnalysis);
     }
 }
 
 /**
  * Fallback: try to parse ElevenLabs' own analysis results
- * if the LLM extraction fails or OpenAI is unavailable.
+ * if the LLM extraction fails or Gemini is unavailable.
  */
 function parseElevenLabsAnalysis(analysis: any): ExtractedOffer | null {
     if (!analysis) return null;
@@ -545,11 +533,11 @@ async function startNegotiationRound(runId: string) {
     // Enable services indicator for the strategy generation phase
     emitRunEvent(runId, {
         type: 'services_change',
-        payload: { perplexity: false, elasticsearch: true, openai: true, stagehand: false, elevenlabs: true, visa: false },
+        payload: { perplexity: false, elasticsearch: true, gemini: true, stagehand: false, elevenlabs: true, visa: false },
     });
 
     // ===== PHASE 1: Generate per-vendor negotiation strategies via LLM =====
-    // For each vendor: retrieve ES intel → call OpenAI → get tailored strategy
+    // For each vendor: retrieve ES intel → call Gemini → get tailored strategy
     const vendorStrategies = new Map<string, string>(); // vendorId → formatted strategy
 
     // Build a map of vendorId → their R1 offer for quick lookup
@@ -566,7 +554,7 @@ async function startNegotiationRound(runId: string) {
                 description: `Retrieving discovery data and call transcript from Elasticsearch, then generating LLM strategy...`,
                 timestamp: new Date(),
                 status: 'running',
-                tool: 'openai',
+                tool: 'gemini',
             },
         });
 
@@ -726,7 +714,7 @@ async function finalizeSummary(runId: string) {
 
     emitRunEvent(runId, {
         type: 'services_change',
-        payload: { perplexity: false, elasticsearch: false, openai: false, stagehand: false, elevenlabs: false, visa: false },
+        payload: { perplexity: false, elasticsearch: false, gemini: false, stagehand: false, elevenlabs: false, visa: false },
     });
     emitRunEvent(runId, { type: 'stage_change', payload: { stage: 'complete' } });
 

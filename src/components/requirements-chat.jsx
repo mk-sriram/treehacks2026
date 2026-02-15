@@ -207,7 +207,7 @@ export function RequirementsChat({ onComplete }) {
     inputRef.current?.focus()
   }, [])
 
-  const handleSend = useCallback(() => {
+  const handleSend = useCallback(async () => {
     const text = input.trim()
     if (!text || isThinking) return
 
@@ -222,63 +222,88 @@ export function RequirementsChat({ onComplete }) {
     setInput("")
     setIsThinking(true)
 
-    setTimeout(() => {
-      const allMessages = [...messages, userMsg]
-      const extracted = parseRequirements(allMessages)
-      setExtraction(extracted)
+    // Minimum delay for UI feel (so it doesn't flash too fast)
+    const minDelay = new Promise(resolve => setTimeout(resolve, 600));
+    
+    // Call LLM extraction API
+    const allMessages = [...messages, userMsg];
+    let extracted = {};
+    
+    try {
+      const [res] = await Promise.all([
+        fetch('/api/extract-requirements', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ messages: allMessages })
+        }),
+        minDelay
+      ]);
 
-      const wantsToGo =
-        text.toLowerCase().includes("go") ||
-        text.toLowerCase().includes("start") ||
-        text.toLowerCase().includes("proceed") ||
-        text.toLowerCase().includes("run") ||
-        text.toLowerCase().includes("looks good") ||
-        text.toLowerCase().includes("let's do it") ||
-        text.toLowerCase().includes("yes")
-
-      const hasEnough =
-        (extracted.item && extracted.quantity) || allMessages.length >= 5
-
-      if (wantsToGo || (hasEnough && Object.keys(extracted).length >= 4)) {
-        const finalRfq = {
-          item: extracted.item || "Custom procurement item",
-          quantity: extracted.quantity || "1,000",
-          leadTime: extracted.leadTime || "30 days",
-          quality: extracted.quality || "Standard",
-          location: extracted.location || "Auto-detected",
-        }
-
-        const confirmMsg = {
-          id: `agent-${Date.now()}`,
-          role: "agent",
-          content: `Locked in. Starting procurement agent now.\n\n**${finalRfq.item}** -- ${finalRfq.quantity} units\nLead time: ${finalRfq.leadTime} | Quality: ${finalRfq.quality}`,
-          timestamp: new Date(),
-          extraction: finalRfq,
-        }
-
-        setMessages((prev) => [...prev, confirmMsg])
-        setIsThinking(false)
-        setIsTransitioning(true)
-
-        setTimeout(() => onComplete(finalRfq), 2000)
+      if (res.ok) {
+        const data = await res.json();
+        extracted = data.extraction || {};
+        console.log('OpenAI extraction:', extracted);
       } else {
-        const userMessageCount = allMessages.filter(
-          (m) => m.role === "user"
-        ).length
-        const responseText = getAgentResponse(extracted, userMessageCount)
-
-        const agentMsg = {
-          id: `agent-${Date.now()}`,
-          role: "agent",
-          content: responseText,
-          timestamp: new Date(),
-          extraction: extracted,
-        }
-
-        setMessages((prev) => [...prev, agentMsg])
-        setIsThinking(false)
+        throw new Error(`API error ${res.status}`);
       }
-    }, 800 + Math.random() * 600)
+    } catch (e) {
+      console.error('⚠️ [FALLBACK] Gemini API extraction failed. Switching to Regex parser.', e);
+      extracted = parseRequirements(allMessages) || {};
+    }
+
+    setExtraction(extracted)
+
+    const wantsToGo =
+      text.toLowerCase().includes("go") ||
+      text.toLowerCase().includes("start") ||
+      text.toLowerCase().includes("proceed") ||
+      text.toLowerCase().includes("run") ||
+      text.toLowerCase().includes("looks good") ||
+      text.toLowerCase().includes("let's do it") ||
+      text.toLowerCase().includes("yes")
+
+    const hasEnough =
+      (extracted.item && extracted.item.length > 2 && extracted.quantity) || allMessages.length >= 5
+
+    if (wantsToGo || (hasEnough && Object.keys(extracted).length >= 3)) { // Slightly relaxed count
+      const finalRfq = {
+        item: extracted.item || "Custom procurement item",
+        quantity: extracted.quantity || "1,000",
+        leadTime: extracted.leadTime || "30 days",
+        quality: extracted.quality || "Standard",
+        location: extracted.location || "Auto-detected",
+      }
+
+      const confirmMsg = {
+        id: `agent-${Date.now()}`,
+        role: "agent",
+        content: `Locked in. Starting procurement agent now.\n\n**${finalRfq.item}** -- ${finalRfq.quantity}\nLead time: ${finalRfq.leadTime} | Quality: ${finalRfq.quality}`,
+        timestamp: new Date(),
+        extraction: finalRfq,
+      }
+
+      setMessages((prev) => [...prev, confirmMsg])
+      setIsThinking(false)
+      setIsTransitioning(true)
+
+      setTimeout(() => onComplete(finalRfq), 2000)
+    } else {
+      const userMessageCount = allMessages.filter(
+        (m) => m.role === "user"
+      ).length
+      const responseText = getAgentResponse(extracted, userMessageCount)
+
+      const agentMsg = {
+        id: `agent-${Date.now()}`,
+        role: "agent",
+        content: responseText,
+        timestamp: new Date(),
+        extraction: extracted,
+      }
+
+      setMessages((prev) => [...prev, agentMsg])
+      setIsThinking(false)
+    }
   }, [input, isThinking, messages, onComplete])
 
   const handleKeyDown = (e) => {

@@ -47,7 +47,7 @@ export async function runOrchestrator(runId: string) {
         emitRunEvent(runId, { type: 'stage_change', payload: { stage: 'finding_suppliers' } });
         emitRunEvent(runId, {
             type: 'services_change',
-            payload: { perplexity: true, elasticsearch: true, openai: false, stagehand: false, elevenlabs: false, visa: false },
+            payload: { perplexity: true, elasticsearch: true, gemini: false, stagehand: false, elevenlabs: false, visa: false },
         });
 
         // Memory check activity
@@ -208,7 +208,7 @@ export async function runOrchestrator(runId: string) {
         emitRunEvent(runId, { type: 'stage_change', payload: { stage: 'calling_for_quote' } });
         emitRunEvent(runId, {
             type: 'services_change',
-            payload: { perplexity: false, elasticsearch: true, openai: false, stagehand: false, elevenlabs: true, visa: false },
+            payload: { perplexity: false, elasticsearch: true, gemini: false, stagehand: false, elevenlabs: true, visa: false },
         });
 
         if (vendorsWithPhone.length === 0) {
@@ -260,8 +260,12 @@ export async function runOrchestrator(runId: string) {
 
                 // Process vendors in batches of MAX_CONCURRENT_CALLS
                 for (let batchStart = 0; batchStart < vendorsWithPhone.length; batchStart += MAX_CONCURRENT_CALLS) {
-                    const batch = vendorsWithPhone.slice(batchStart, batchStart + MAX_CONCURRENT_CALLS);
-                    console.log(`[ORCHESTRATOR] Call batch ${Math.floor(batchStart / MAX_CONCURRENT_CALLS) + 1}: ${batch.map(v => v.name).join(', ')}`);
+                    // TEST MODE: Only call the first vendor
+                    const batch = vendorsWithPhone.slice(0, 1);
+                    console.log(`[ORCHESTRATOR] TEST MODE: Calling only 1 vendor: ${batch[0].name}`);
+
+                    // Stop loop after first batch
+                    batchStart = vendorsWithPhone.length;
 
                     const batchPromises = batch.map(async (vendor, i) => {
                         const callActivityId = makeActivityId();

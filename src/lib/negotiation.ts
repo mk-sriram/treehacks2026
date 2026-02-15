@@ -1,14 +1,13 @@
 // Negotiation strategy planner
-// Uses Gemini with grounded Google Search to generate per-vendor negotiation
-// strategies from:
+// Uses OpenAI (ChatGPT) to generate per-vendor negotiation strategies from:
 //   - Vendor's round 1 offer (Postgres)
 //   - Vendor's Sonar discovery data (Elasticsearch, channel='search')
 //   - Vendor's round 1 call transcript (Elasticsearch, channel='call')
 //   - All competing offers from other vendors (Postgres)
 //   - Best price / best supplier from round 1
-//   - Live web search via Gemini's google_search tool (market pricing, vendor info)
 
 import { retrieveMemory } from './elastic';
+import OpenAI from 'openai';
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -84,78 +83,48 @@ export async function retrieveVendorIntelligence(
     return { sonarData, callTranscript };
 }
 
-// ─── Gemini strategy generation (with grounded Google Search) ─────────
+// ─── OpenAI strategy generation ──────────────────────────────────────
 
 /**
- * Generate a per-vendor negotiation strategy using Gemini with grounded
- * Google Search. The google_search tool lets Gemini look up live market
- * pricing, vendor reputation, and industry benchmarks during generation.
+ * Generate a per-vendor negotiation strategy using OpenAI.
+ * Uses available context (including Sonar data) to inform the strategy.
  *
- * Falls back to a basic rule-based strategy if the API call fails.
- *
- * Env var: GEMINI_API_KEY
+ * Env var: OPENAI_API_KEY
  */
 export async function generateNegotiationStrategy(
     input: NegotiationStrategyInput,
     sonarData: string,
     callTranscript: string,
 ): Promise<NegotiationStrategy> {
-    const geminiKey = process.env.GEMINI_API_KEY;
+    const apiKey = process.env.OPENAI_API_KEY;
 
-    if (!geminiKey) {
-        console.warn('[NEGOTIATION] GEMINI_API_KEY not set — using basic strategy');
+    if (!apiKey) {
+        console.warn('[NEGOTIATION] OPENAI_API_KEY not set — using basic strategy');
         return buildFallbackStrategy(input);
     }
 
+    const openai = new OpenAI({ apiKey });
     const prompt = buildStrategyPrompt(input, sonarData, callTranscript);
 
     try {
-        console.log(`[NEGOTIATION] Generating strategy for ${input.vendorName} via Gemini + Google Search...`);
+        console.log(`[NEGOTIATION] Generating strategy for ${input.vendorName} via OpenAI...`);
 
-        const res = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`,
-            {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    contents: [
-                        { parts: [{ text: prompt }] },
-                    ],
-                    tools: [
-                        { google_search: {} },   // enable grounded web search
-                    ],
-                    generationConfig: {
-                        temperature: 0.3,
-                        responseMimeType: 'application/json',
-                    },
-                }),
-            },
-        );
+        const completion = await openai.chat.completions.create({
+            model: "gpt-4o-mini",
+            messages: [
+                { role: "system", content: "You are a procurement negotiation strategist. Output valid JSON." },
+                { role: "user", content: prompt }
+            ],
+            response_format: { type: "json_object" },
+            temperature: 0.3,
+        });
 
-        if (!res.ok) {
-            const errText = await res.text();
-            console.error(`[NEGOTIATION] Gemini API error: ${res.status}`, errText.slice(0, 400));
-            return buildFallbackStrategy(input);
-        }
+        const content = completion.choices[0].message.content;
+        console.log(`[NEGOTIATION] OpenAI raw response for ${input.vendorName}:`, content?.slice(0, 500));
 
-        const data = await res.json();
+        if (!content) return buildFallbackStrategy(input);
 
-        // Gemini response: candidates[0].content.parts[0].text
-        const textContent = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-        console.log(`[NEGOTIATION] Gemini raw response for ${input.vendorName}:`, textContent.slice(0, 500));
-
-        // Log grounding metadata if present (search queries Gemini ran)
-        const groundingMeta = data.candidates?.[0]?.groundingMetadata;
-        if (groundingMeta?.searchEntryPoint) {
-            console.log(`[NEGOTIATION] Gemini used grounded search for ${input.vendorName}`);
-        }
-        if (groundingMeta?.groundingChunks?.length) {
-            console.log(`[NEGOTIATION] Grounding sources: ${groundingMeta.groundingChunks.length} web results used`);
-        }
-
-        // Parse JSON — strip markdown fences if Gemini wraps them
-        const cleanJson = textContent.replace(/^```json\s*/i, '').replace(/\s*```$/i, '').trim();
-        const parsed = JSON.parse(cleanJson);
+        const parsed = JSON.parse(content);
 
         return {
             openingApproach: parsed.opening_approach ?? 'Reference our previous conversation and mention we have competing quotes.',
@@ -166,7 +135,7 @@ export async function generateNegotiationStrategy(
             riskNotes: parsed.risk_notes ?? 'Avoid revealing exact competing vendor names if possible.',
         };
     } catch (err) {
-        console.error('[NEGOTIATION] Gemini strategy generation failed:', err);
+        console.error('[NEGOTIATION] OpenAI strategy generation failed:', err);
         return buildFallbackStrategy(input);
     }
 }
@@ -178,12 +147,7 @@ function buildStrategyPrompt(
     sonarData: string,
     callTranscript: string,
 ): string {
-    return `You are a procurement negotiation strategist with access to live web search. Given the following data about a vendor and the competitive landscape, create a specific negotiation plan for a follow-up phone call.
-
-IMPORTANT: Use your Google Search capability to:
-1. Look up current market pricing for "${input.item}" to validate whether the quotes we received are reasonable
-2. Search for "${input.vendorName}" to find any public info about their pricing, reputation, or recent news
-3. Find industry benchmarks for bulk pricing on this type of product
+    return `You are a procurement negotiation strategist. Given the following data about a vendor and the competitive landscape, create a specific negotiation plan for a follow-up phone call.
 
 VENDOR: ${input.vendorName}
 ITEM WE'RE BUYING: ${input.item} (quantity: ${input.quantity})
@@ -194,7 +158,7 @@ THEIR ROUND 1 QUOTE:
 - Lead time: ${input.r1LeadTimeDays != null ? `${input.r1LeadTimeDays} days` : 'Not specified'}
 - Payment terms: ${input.r1Terms ?? 'Not specified'}
 
-VENDOR BACKGROUND (from our earlier web research):
+VENDOR BACKGROUND (from our earlier research):
 ${sonarData || 'No background data available.'}
 
 ROUND 1 CALL SUMMARY:
@@ -206,15 +170,15 @@ ${input.allCompetingOffers || 'No other quotes available.'}
 BEST COMPETING PRICE: ${input.bestPrice}/unit from ${input.bestSupplier}
 
 INSTRUCTIONS:
-Create a negotiation strategy for a follow-up call with this vendor. The goal is to get a lower price, ideally matching or beating the best competing offer. Factor in any market pricing data you found via web search. Consider the vendor's strengths, weaknesses, and any leverage points from their background or the competitive landscape.
+Create a negotiation strategy for a follow-up call with this vendor. The goal is to get a lower price, ideally matching or beating the best competing offer. Consider the vendor's strengths, weaknesses, and any leverage points from their background or the competitive landscape.
 
 Output ONLY valid JSON with this structure:
 {
   "opening_approach": "How to open the negotiation call — 1-2 natural sentences the AI agent should use to frame the conversation",
   "key_leverage_points": ["point1", "point2", "point3"],
-  "target_price": "$X.XX — the price we should push for, informed by market research",
+  "target_price": "$X.XX — the price we should push for",
   "fallback_position": "What to accept if they can't hit the target — e.g. better terms, faster shipping, volume discount",
-  "talking_points": "2-3 sentence guidance for the AI phone agent on how to conduct this specific negotiation. Be concrete, reference the data above and any market pricing found via search. This will be directly injected into the agent's prompt.",
+  "talking_points": "2-3 sentence guidance for the AI phone agent on how to conduct this specific negotiation. Be concrete.",
   "risk_notes": "Any risks or things to avoid mentioning during this call"
 }`;
 }

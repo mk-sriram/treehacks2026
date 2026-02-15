@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useCallback, useRef } from "react"
+import { useState, useCallback, useRef, useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Separator } from "@/components/ui/separator"
@@ -45,7 +45,7 @@ const DEFAULT_SERVICES = {
   stagehand: false,
   elevenlabs: false,
   elasticsearch: false,
-  openai: false,
+  gemini: false,
   visa: false,
 }
 
@@ -99,35 +99,39 @@ export default function ProcurementAgent() {
       const eventSource = new EventSource(`/api/run/${runId}/events`)
 
       eventSource.onmessage = (e) => {
-        const event = JSON.parse(e.data)
-        switch (event.type) {
-          case 'stage_change':
-            setStage(event.payload.stage)
-            break
-          case 'activity':
-            setActivities((prev) => [...prev, event.payload])
-            break
-          case 'update_activity':
-            setActivities((prev) =>
-              prev.map((a) =>
-                a.id === event.payload.id
-                  ? { ...a, ...event.payload.updates }
-                  : a
+        try {
+          const event = JSON.parse(e.data)
+          switch (event.type) {
+            case 'stage_change':
+              setStage(event.payload.stage)
+              break
+            case 'activity':
+              setActivities((prev) => [...prev, event.payload])
+              break
+            case 'update_activity':
+              setActivities((prev) =>
+                prev.map((a) =>
+                  a.id === event.payload.id
+                    ? { ...a, ...event.payload.updates }
+                    : a
+                )
               )
-            )
-            break
-          case 'quote':
-            setQuotes((prev) => [...prev, event.payload])
-            break
-          case 'calls_change':
-            setCalls(event.payload)
-            break
-          case 'summary':
-            setSummary(event.payload)
-            break
-          case 'services_change':
-            setActiveServices(event.payload)
-            break
+              break
+            case 'quote':
+              setQuotes((prev) => [...prev, event.payload])
+              break
+            case 'calls_change':
+              setCalls(event.payload)
+              break
+            case 'summary':
+              setSummary(event.payload)
+              break
+            case 'services_change':
+              setActiveServices(event.payload)
+              break
+          }
+        } catch (err) {
+          console.error('Error parsing SSE event:', err, e.data)
         }
       }
 
@@ -137,6 +141,7 @@ export default function ProcurementAgent() {
       }
 
       cleanupRef.current = () => {
+        console.log('Cleaning up EventSource')
         eventSource.close()
       }
     } catch (err) {
@@ -146,10 +151,14 @@ export default function ProcurementAgent() {
   }, [rfq])
 
   const hasAutoStarted = useRef(false)
-  if (dashboardReady && !hasAutoStarted.current && stage === "idle") {
-    hasAutoStarted.current = true
-    setTimeout(() => handleStart(), 100)
-  }
+  
+  // Use useEffect for side effects, not render body
+  useEffect(() => {
+    if (dashboardReady && !hasAutoStarted.current && stage === "idle") {
+      hasAutoStarted.current = true
+      handleStart()
+    }
+  }, [dashboardReady, stage, handleStart])
 
   const handleReset = useCallback(() => {
     cleanupRef.current?.()
@@ -402,10 +411,10 @@ export default function ProcurementAgent() {
                   wasActive={everActive.elasticsearch}
                 />
                 <ServiceItem
-                  label="OpenAI Structured"
-                  description="Schema validation & extraction"
-                  active={activeServices.openai}
-                  wasActive={everActive.openai}
+                  label="Gemini 2.5 Flash"
+                  description="Extraction & negotiation strategy"
+                  active={activeServices.gemini}
+                  wasActive={everActive.gemini}
                 />
                 <ServiceItem
                   label="Visa B2B + Coinbase"

@@ -47,7 +47,7 @@ export function simulateWorkflow(rfq, callbacks) {
       stagehand: false,
       elevenlabs: false,
       elasticsearch: false,
-      openai: false,
+      gemini: false,
       visa: false,
       ...patch,
     })
@@ -56,7 +56,7 @@ export function simulateWorkflow(rfq, callbacks) {
   // ===== STAGE 1: Finding Suppliers =====
   addStep(300, () => {
     callbacks.onStageChange("finding_suppliers")
-    svc({ perplexity: true, elasticsearch: true, openai: true })
+    svc({ perplexity: true, elasticsearch: true, gemini: true })
   })
 
   const pGroup1 = "search-parallel-1"
@@ -91,7 +91,7 @@ export function simulateWorkflow(rfq, callbacks) {
     })
   })
 
-  const analyzeActivity = createActivity("analyze", "Market Intelligence Analysis", "Analyzing pricing trends, MOQ ranges, and reliability scores across sources", "openai-structured")
+  const analyzeActivity = createActivity("analyze", "Market Intelligence Analysis", "Analyzing pricing trends, MOQ ranges, and reliability scores across sources", "gemini")
   addStep(400, () => callbacks.onActivity(analyzeActivity))
   addStep(2000, () => {
     callbacks.onUpdateActivity(analyzeActivity.id, {
@@ -103,7 +103,7 @@ export function simulateWorkflow(rfq, callbacks) {
   // ===== STAGE 2: Calling for Quote (Multiple parallel calls) =====
   addStep(600, () => {
     callbacks.onStageChange("calling_for_quote")
-    svc({ elevenlabs: true, openai: true })
+    svc({ elevenlabs: true, gemini: true })
   })
 
   const call1Id = "call-1"
@@ -224,7 +224,7 @@ export function simulateWorkflow(rfq, callbacks) {
   // ===== STAGE 3: Web Quoting (Parallel browsing) =====
   addStep(600, () => {
     callbacks.onStageChange("requesting_web_quote")
-    svc({ stagehand: true, openai: true })
+    svc({ stagehand: true, gemini: true })
     callbacks.onCallsChange([])
   })
 
@@ -274,11 +274,11 @@ export function simulateWorkflow(rfq, callbacks) {
   // ===== STAGE 4: Negotiating (calls + mid-call data retrieval) =====
   addStep(600, () => {
     callbacks.onStageChange("negotiating")
-    svc({ openai: true, elasticsearch: true, elevenlabs: true })
+    svc({ gemini: true, elasticsearch: true, elevenlabs: true })
   })
 
   const negGroup = "negotiate-parallel"
-  const neg1 = createActivity("analyze", "Preparing Negotiation Strategy", "Building anchoring strategy from market data and past outcomes", "openai-structured", negGroup)
+  const neg1 = createActivity("negotiate", "Preparing Negotiation Strategy", "Building anchoring strategy from market data and past outcomes", "gemini", negGroup)
   const neg2 = createActivity("memory", "Elasticsearch: Tactic Lookup", "Retrieving winning negotiation tactics for similar SKUs", "elasticsearch", negGroup)
 
   addStep(400, () => {
@@ -319,7 +319,7 @@ export function simulateWorkflow(rfq, callbacks) {
 
   const sub1 = createSubAction("Retrieving competitor pricing for leverage", "elasticsearch")
   addStep(2000, () => {
-    svc({ openai: true, elasticsearch: true, elevenlabs: true })
+    svc({ gemini: true, elasticsearch: true, elevenlabs: true })
     callbacks.onCallsChange([
       {
         id: negCall1Id, active: true, supplier: DEMO_SUPPLIERS[2], duration: 0, status: "connected",
@@ -446,7 +446,7 @@ export function simulateWorkflow(rfq, callbacks) {
   })
 
   // Store outcomes
-  const negMemory = createActivity("negotiate", "Negotiation Outcomes Stored", "Writing final terms and tactic scores to memory", "openai-structured")
+  const negMemory = createActivity("negotiate", "Negotiation Outcomes Stored", "Writing final terms and tactic scores to memory", "gemini")
   addStep(400, () => callbacks.onActivity(negMemory))
 
   const memoryWrite = createActivity("memory", "Elasticsearch: Index Results", "Indexing negotiation outcomes, transcripts, and tactic effectiveness", "elasticsearch")
