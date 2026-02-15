@@ -1,6 +1,8 @@
-# Wallet Server — Mock B2B Vendor Invoice System
+# Wallet Server — Formosa Advanced Materials (Mock Vendor)
 
-Email-driven invoice workflow for local development. Uses [AgentMail](https://www.agentmail.to/) for email handling. No blockchain, no real wallet — purely simulated settlement.
+Mock B2B semiconductor vendor site with email-driven invoice workflow. Includes a realistic company landing page (product catalog, certifications, contact info) and an invoice/payment backend powered by [AgentMail](https://www.agentmail.to/). No blockchain, no real wallet — purely simulated settlement.
+
+Visit **http://localhost:4020** to see the company landing page.
 
 ## How It Works
 
@@ -60,6 +62,7 @@ Server listens on **http://localhost:4020** by default.
 | `AGENTMAIL_API_KEY` | **Yes** | — | AgentMail API bearer token |
 | `AGENTMAIL_INBOX_ID` | **Yes** | — | Inbox ID or address (e.g. `vendor@agentmail.to`) |
 | `MOCK_WALLET_ADDRESS` | No | `0xMockTaiwanVendorWallet123` | Wallet address in invoice replies |
+| `PHONE_NUMBER` | No | `+886-3-578-0000` | Phone number shown on the landing page |
 
 ## Setting Up the AgentMail Webhook
 
@@ -84,6 +87,25 @@ curl -X POST https://api.agentmail.to/v0/webhooks \
 3. AgentMail will now POST to `/webhook/agentmail` whenever an email arrives at your inbox.
 
 ## API Reference
+
+### `GET /` (Landing Page)
+
+Serves the Formosa Advanced Materials company website — product catalog, capabilities, certifications, and contact info. Contact email and phone are loaded dynamically from env vars via `/api/contact-info`.
+
+### `GET /api/contact-info`
+
+Returns company contact info (from env vars). Used by the landing page.
+
+**Response:** `200`
+
+```json
+{
+  "email": "semivendor@agentmail.to",
+  "phone": "+886-3-578-9200",
+  "company": "Formosa Advanced Materials Co., Ltd.",
+  "address": "No. 8, Lixing 5th Rd., Hsinchu Science Park, Hsinchu 30078, Taiwan"
+}
+```
 
 ### `GET /health`
 
@@ -195,9 +217,12 @@ curl -X POST http://localhost:4020/initiate-payment \
 
 ```
 wallet_server/
-  ├── server.js                 # Express app, mounts routes
+  ├── server.js                 # Express app, static files, mounts routes
   ├── package.json
   ├── .env.example
+  ├── public/
+  │     ├── index.html          # Company landing page (Formosa Advanced Materials)
+  │     └── styles.css          # Landing page styles
   ├── routes/
   │     ├── webhookRoutes.js    # POST /webhook/agentmail
   │     └── paymentRoutes.js    # POST /initiate-payment, GET /invoices

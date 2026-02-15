@@ -12,6 +12,7 @@
 
 require('dotenv').config();
 
+const path = require('path');
 const express = require('express');
 const webhookRoutes = require('./routes/webhookRoutes');
 const paymentRoutes = require('./routes/paymentRoutes');
@@ -31,15 +32,28 @@ app.use((_req, res, next) => {
   next();
 });
 
+// --- Static files (company landing page) ---
+app.use(express.static(path.join(__dirname, 'public')));
+
 // --- Routes ---
 app.get('/health', (_req, res) => {
   res.json({ ok: true });
 });
 
+// Contact info endpoint — serves env vars to the landing page
+app.get('/api/contact-info', (_req, res) => {
+  res.json({
+    email: process.env.AGENTMAIL_INBOX_ID || 'sales@formosa-am.com.tw',
+    phone: process.env.PHONE_NUMBER || '+886-3-578-0000',
+    company: 'Formosa Advanced Materials Co., Ltd.',
+    address: 'No. 8, Lixing 5th Rd., Hsinchu Science Park, Hsinchu 30078, Taiwan',
+  });
+});
+
 app.use(webhookRoutes);
 app.use(paymentRoutes);
 
-// --- 404 fallback ---
+// --- 404 fallback (API only — static files already handled above) ---
 app.use((_req, res) => {
   res.status(404).json({ error: 'Not found' });
 });
@@ -48,7 +62,9 @@ app.use((_req, res) => {
 app.listen(PORT, () => {
   console.log(`[wallet-server] Listening on http://localhost:${PORT}`);
   console.log('[wallet-server] Routes:');
+  console.log('  GET  /                   — company landing page');
   console.log('  GET  /health             — health check');
+  console.log('  GET  /api/contact-info   — company contact info (from env)');
   console.log('  POST /webhook/agentmail  — AgentMail inbound email webhook');
   console.log('  POST /initiate-payment   — simulate payment for an invoice');
   console.log('  GET  /invoices           — list all invoices (debug)');
