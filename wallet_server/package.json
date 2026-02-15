@@ -1,8 +1,8 @@
 {
   "name": "wallet-server",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Standalone x402-compatible dummy wallet server for local development",
+  "description": "Mock B2B vendor invoice server with AgentMail email integration",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -12,6 +12,7 @@
     "node": ">=18"
   },
   "dependencies": {
-    "dotenv": "^17.3.1"
+    "dotenv": "^17.3.1",
+    "express": "^5.1.0"
   }
 }
